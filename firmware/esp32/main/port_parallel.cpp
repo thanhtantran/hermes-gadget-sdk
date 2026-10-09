@@ -13,6 +13,7 @@
 // Copyright (c) 2022 Xinyuan-LilyGO. See LICENSES/LilyGO-MIT.txt and NOTICE.
 #include "port.hpp"  // first: pulls in FreeRTOS.h ahead of task.h/queue.h
 
+#if SOC_LCD_I80_SUPPORTED
 #include <algorithm>
 #include <cstring>
 
@@ -204,3 +205,11 @@ void ParallelDisplay::set_backlight(uint8_t percent) {
 }
 
 }  // namespace hgp
+#else
+namespace hgp {
+bool ParallelDisplay::begin(const LcdConfig&, int) { return false; }
+hg::DisplayInfo ParallelDisplay::info() const { return {}; }
+void ParallelDisplay::flush(uint16_t, uint16_t) {}
+void ParallelDisplay::set_backlight(uint8_t) {}
+}  // namespace hgp
+#endif

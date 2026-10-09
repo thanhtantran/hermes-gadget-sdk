@@ -10,6 +10,8 @@ namespace {
 // which also keeps the linker from dropping it.
 #if CONFIG_HG_BOARD_ESP32S3_BREADBOARD
 #define HG_BOARD_NAME "esp32s3-breadboard"
+#elif CONFIG_HG_BOARD_ESP32_CYD
+#define HG_BOARD_NAME "esp32-2432s028-cyd"
 #elif CONFIG_HG_BOARD_AMOLED_175
 #define HG_BOARD_NAME "esp32s3-touch-amoled-1.75"
 #elif CONFIG_HG_BOARD_AMOLED_175C
@@ -55,6 +57,35 @@ BoardConfig make() {
   b.buttons = {0, 14, -1, -1};
   b.talk_label = "BOOT";
   b.cancel_label = "B2";
+  return b;
+}
+#elif CONFIG_HG_BOARD_ESP32_CYD
+// Hardware settings from Tony Tran's working LGFX_CYD.hpp / CYD_LGFX_Test.ino.
+// ILI9341 only: landscape rotation 1, inversion on, BGR, SPI2 mode 0.
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.controller = LcdController::Ili9341;
+  b.lcd.width = 320;
+  b.lcd.height = 240;
+  b.lcd.swap_xy = true;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = false;
+  b.lcd.invert = true;
+  b.lcd.bgr = true;  // CYD_RGB_ORDER=3 in the sketch is converted to bool.
+  b.lcd.mosi = 13;
+  b.lcd.miso = 12;
+  b.lcd.sclk = 14;
+  b.lcd.cs = 15;
+  b.lcd.dc = 2;
+  b.lcd.rst = -1;
+  b.lcd.backlight = 21;
+  b.lcd.spi_mhz = 40;
+  b.buttons = {0, -1, -1, -1};
+  b.talk_label = "BOOT";
+  // The analog microphone, DAC speaker and XPT2046 need separate drivers.
+  // Do not advertise I2S audio or I2C touch capabilities for them.
   return b;
 }
 #elif CONFIG_HG_BOARD_AMOLED_175 || CONFIG_HG_BOARD_AMOLED_175C

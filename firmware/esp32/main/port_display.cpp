@@ -1,5 +1,5 @@
-// SPI LCD panels via esp_lcd. The full framebuffer lives in PSRAM; rows are
-// copied through a small DMA-capable bounce buffer on flush.
+// SPI LCD panels via esp_lcd. Prefer PSRAM; CYD reserves internal RAM early.
+// Rows are copied through a small DMA-capable bounce buffer on flush.
 #include "port.hpp"  // first: pulls in FreeRTOS.h ahead of task.h/queue.h
 
 #include <algorithm>
@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_st7789.h"
+#include "esp_lcd_ili9341.h"
 #include "esp_log.h"
 #include "panel_box3.hpp"
 #include "panel_cores3.hpp"
@@ -22,7 +23,20 @@ namespace {
 
 const char* TAG = "hg.lcd";
 constexpr spi_host_device_t kHost = SPI2_HOST;
+#if CONFIG_HG_BOARD_ESP32_CYD
+constexpr int kBounceRows = 4;
+constexpr size_t kCydFramebufferBytes = 320 * 240 * sizeof(uint16_t);
+uint16_t* cyd_framebuffer = nullptr;
+
+// Reserve the contiguous 150 KiB before C++ objects, tasks and Wi-Fi fragment
+// the internal heap. Do not log or use FreeRTOS before the scheduler starts.
+__attribute__((constructor(101))) void reserve_cyd_framebuffer() {
+  cyd_framebuffer = static_cast<uint16_t*>(
+      heap_caps_malloc(kCydFramebufferBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+#else
 constexpr int kBounceRows = 20;
+#endif
 constexpr ledc_channel_t kBlChannel = LEDC_CHANNEL_0;
 
 }  // namespace
@@ -37,7 +51,7 @@ bool SpiDisplay::on_trans_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event
 bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   cfg_ = cfg;
   const bool qspi = cfg.controller == LcdController::St77916;
-  bool ili9341 = false;
+  bool ili9341 = cfg.controller == LcdController::Ili9341;
   bool cores3_e = false;
   if (cfg.controller == LcdController::Box3) {
     if (!i2c_bus) return false;
@@ -49,7 +63,8 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
       ili9341 = true;
     }
   }
-  controller_name_ = qspi ? "st77916" : ili9341 ? "ili9342" : "st7789";
+  controller_name_ = qspi ? "st77916" : ili9341 ?
+      (cfg.controller == LcdController::Ili9341 ? "ili9341" : "ili9342") : "st7789";
   if (cfg.controller == LcdController::CoreS3) {
     if (!i2c_bus) return false;
     i2c_device_config_t device = {};
@@ -78,8 +93,19 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
     controller_name_ = cores3_e ? "ili9342e" : "ili9342c";
   }
   const size_t px = static_cast<size_t>(cfg.width) * cfg.height;
+#if CONFIG_HG_BOARD_ESP32_CYD
+  if (px * sizeof(uint16_t) != kCydFramebufferBytes) return false;
+  fb_ = cyd_framebuffer;
+  if (!fb_) {
+    ESP_LOGE(TAG, "early CYD framebuffer allocation failed (need %u bytes, largest block %u)",
+             static_cast<unsigned>(kCydFramebufferBytes),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    return false;
+  }
+#else
   fb_ = static_cast<uint16_t*>(heap_caps_malloc(px * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (!fb_) fb_ = static_cast<uint16_t*>(heap_caps_malloc(px * 2, MALLOC_CAP_8BIT));
+#endif
   bounce_ = static_cast<uint16_t*>(heap_caps_malloc(static_cast<size_t>(cfg.width) * kBounceRows * 2, MALLOC_CAP_DMA));
   if (!fb_ || !bounce_) {
     ESP_LOGE(TAG, "not enough memory for a %ux%u framebuffer", cfg.width, cfg.height);
@@ -87,6 +113,7 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   }
   std::memset(fb_, 0, px * 2);
   done_ = xSemaphoreCreateBinary();
+  if (!done_) return false;
   // A band takes about 2.6 ms on a 320-px panel at 40 MHz. Allow ten times the
   // band at the configured clock, and never less than 100 ms.
   const uint32_t band_ms = static_cast<uint32_t>(cfg.width) * kBounceRows * 16 / (std::max(1, cfg.spi_mhz) * 1000u) + 1;
@@ -101,7 +128,7 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
 
   spi_bus_config_t bus = {};
   bus.mosi_io_num = cfg.mosi;
-  bus.miso_io_num = -1;
+  bus.miso_io_num = cfg.miso;
   bus.sclk_io_num = cfg.sclk;
   bus.quadwp_io_num = -1;
   bus.quadhd_io_num = -1;

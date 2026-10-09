@@ -30,7 +30,7 @@ struct RgbPanelConfig {
   uint32_t pclk_hz = 12000000;
 };
 
-enum class LcdController { St7789, Box3, CoreS3, St77916 };
+enum class LcdController { St7789, Box3, CoreS3, St77916, Ili9341 };
 
 struct LcdConfig {
   bool enabled = false;
@@ -47,6 +47,7 @@ struct LcdConfig {
   bool bgr = false;  // the panel's color filter is BGR (SpiDisplay)
   int d1 = -1, d2 = -1, d3 = -1;  // QSPI data0 uses mosi
   bool round = false;
+  int miso = -1;  // optional; write-only panels do not need read transactions
 };
 
 struct I2sMicConfig {

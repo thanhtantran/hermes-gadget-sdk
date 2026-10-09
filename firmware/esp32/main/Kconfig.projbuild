@@ -29,6 +29,9 @@ menu "Hermes Gadget"
 
         config HG_BOARD_ESP32S3_BREADBOARD
             bool "ESP32-S3 breadboard (ST7789 + INMP441 + MAX98357A)"
+        config HG_BOARD_ESP32_CYD
+            bool "ESP32-2432S028 CYD (ILI9341 320x240, no PSRAM, experimental)"
+            depends on IDF_TARGET_ESP32
         config HG_BOARD_AMOLED_175
             bool "Waveshare ESP32-S3-Touch-AMOLED-1.75 (round AMOLED, touch, codecs)"
         config HG_BOARD_AMOLED_175C

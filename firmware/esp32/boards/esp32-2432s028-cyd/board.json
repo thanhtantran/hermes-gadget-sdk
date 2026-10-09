@@ -1,0 +1,6 @@
+{
+  "title": "ESP32-2432S028 CYD (ILI9341)",
+  "summary": "Experimental 2.8-inch 320x240 display, BOOT button, 4 MB flash, no PSRAM. Text only; touch and analog audio are not enabled.",
+  "docs": "https://github.com/Adolanium/hermes-gadget-sdk/blob/main/firmware/esp32/boards/esp32-2432s028-cyd/README.md",
+  "ready_made": true
+}

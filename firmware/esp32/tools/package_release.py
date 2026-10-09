@@ -102,9 +102,14 @@ def app_identity(app: bytes) -> tuple[str, str]:
     if project != PROJECT_NAME:
         raise PackageError(f"firmware.bin is {project!r}, not Hermes Gadget firmware")
     tag = app.find(BOARD_TAG)
-    if tag < 0:
-        raise PackageError("firmware.bin carries no board name (HGBOARD=...)")
-    return _cstr(app[48:80]), _cstr(app[tag + len(BOARD_TAG): tag + len(BOARD_TAG) + 64])
+    while tag >= 0:
+        name = _cstr(app[tag + len(BOARD_TAG): tag + len(BOARD_TAG) + 64])
+        # The OTA scanner's bare "HGBOARD=" string can precede board.cpp's
+        # identity, depending on the target's linker layout.
+        if name:
+            return _cstr(app[48:80]), name
+        tag = app.find(BOARD_TAG, tag + len(BOARD_TAG))
+    raise PackageError("firmware.bin carries no board name (HGBOARD=...)")
 
 
 def merge(parts: list[tuple[int, bytes]]) -> bytes:

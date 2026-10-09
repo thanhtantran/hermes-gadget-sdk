@@ -20,6 +20,9 @@ hgp::EspSystem g_system;
 hgp::NvsStorage g_storage;
 hgp::WsTransport g_transport;
 hgp::SpiDisplay g_display;
+#if !CONFIG_HG_BOARD_ESP32_CYD
+// CYD needs the contiguous internal RAM occupied by unused driver instances
+// and their linked data. Its supported peripherals are wired separately below.
 hgp::ParallelDisplay g_parallel;
 hgp::RgbDisplay g_rgb;
 hgp::AmoledDisplay g_amoled;
@@ -28,13 +31,14 @@ hgp::I2sSpeaker g_speaker;
 hgp::CodecAudio g_codec;
 hgp::CodecMic g_codec_mic;
 hgp::CodecSpeaker g_codec_speaker;
-hgp::Buttons g_buttons;
 hgp::TouchInput g_touch;
-hgp::Wifi g_wifi;
-hgp::EspUpdater g_updater;
 hgp::AxpPower g_power;
 hgp::LatchPower g_latch_power;
 hgp::CoreS3Board g_cores3;
+#endif
+hgp::Buttons g_buttons;
+hgp::Wifi g_wifi;
+hgp::EspUpdater g_updater;
 hg::TouchGestures* g_gestures = nullptr;
 
 // touch_cancel: which inputs act as CANCEL on touch boards.
@@ -155,7 +159,9 @@ extern "C" void app_main(void) {
   hgp::events::init();
   ESP_ERROR_CHECK(g_storage.begin() ? ESP_OK : ESP_FAIL);
   const hgp::BoardConfig& board = hgp::board_config();
+#if !CONFIG_HG_BOARD_ESP32_CYD
   const bool latch_power = board.latch_power.enabled && g_latch_power.begin(board.latch_power);
+#endif
   const char* version = esp_app_get_description()->version;
   ESP_LOGI(TAG, "Hermes Gadget %s on %s", version, board.name);
 #if CONFIG_SPIRAM
@@ -180,8 +186,14 @@ extern "C" void app_main(void) {
   hal.system = &g_system;
   hal.transport = &g_transport;
   hal.storage = &g_storage;
-  if (latch_power) hal.power = &g_latch_power;
   if (g_updater.capacity()) hal.updater = &g_updater;
+#if CONFIG_HG_BOARD_ESP32_CYD
+  if (board.lcd.enabled && g_display.begin(board.lcd, nullptr)) hal.display = &g_display;
+  constexpr bool touch = false;
+  hgp::diag::Parts parts;
+  parts.display = hal.display ? g_display.controller_name() : "none";
+#else
+  if (latch_power) hal.power = &g_latch_power;
   i2c_master_bus_handle_t i2c_bus = hgp::i2c::bus(board.i2c);
   const bool peripherals_ready = (!board.cores3 || g_cores3.begin(i2c_bus)) &&
       (!board.expander_reset.mask || hgp::tca9554_reset(i2c_bus, board.expander_reset));
@@ -207,7 +219,6 @@ extern "C" void app_main(void) {
     if (g_codec_mic.begin(g_codec.in(), board.codec.rmnm_mics)) hal.mic = &g_codec_mic;
     if (g_codec_speaker.begin(g_codec.out(), board.codec.stereo32, board.codec.speaker_pa ? board.codec.pa : -1)) hal.speaker = &g_codec_speaker;
   }
-  g_buttons.begin(board.buttons);
   const bool touch = peripherals_ready && (board.touch.enabled || board.pwr_key.enabled || board.encoder.a >= 0) &&
                      g_touch.begin(board.touch, board.pwr_key, board.encoder, i2c_bus);
 
@@ -225,6 +236,8 @@ extern "C" void app_main(void) {
   parts.touch = touch && g_touch.has_touch();
   parts.key = touch && g_touch.has_key();
   parts.i2c = i2c_bus;
+#endif
+  g_buttons.begin(board.buttons);
   hgp::diag::set_parts(parts);
   hgp::diag::log_boot_summary();
 
@@ -242,10 +255,18 @@ extern "C" void app_main(void) {
     profile.touch_screen = true;
     profile.extra_settings = {"touch_cancel"};
   }
+#if !CONFIG_HG_BOARD_ESP32_CYD
   if (hal.mic == &g_codec_mic) profile.mic_rate = hgp::CodecAudio::kRate;
   if (hal.speaker == &g_codec_speaker) profile.speaker_rate = hgp::CodecAudio::kRate;
+#endif
 
+#if CONFIG_HG_BOARD_ESP32_CYD
+  // Move the app's storage out of static DRAM so the early framebuffer can
+  // occupy the largest region. The scheduler has released D/IRAM by now.
+  static hg::App& app = *new hg::App(hal, profile);
+#else
   static hg::App app(hal, profile);
+#endif
   static hg::TouchGestures gestures(app);
   if (profile.touch_screen) g_gestures = &gestures;
   apply_touch_cancel();

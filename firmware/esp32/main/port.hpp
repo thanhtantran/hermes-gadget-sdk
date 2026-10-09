@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"  // must precede every other FreeRTOS header
 
 #include "board.hpp"
+#include "soc/soc_caps.h"
 #include "axp2101.hpp"
 #include "band_flush.hpp"
 #include "cores3.hpp"
@@ -28,8 +29,12 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_lcd_panel_io.h"
+#if SOC_LCD_RGB_SUPPORTED
 #include "esp_lcd_panel_rgb.h"
+#endif
+#if SOC_LCD_I80_SUPPORTED
 #include "esp_lcd_io_i80.h"
+#endif
 #include "esp_lcd_types.h"
 #include "esp_lcd_touch.h"
 #include "esp_log.h"
@@ -142,7 +147,9 @@ class RgbDisplay final : public hg::Display {
   void set_backlight(uint8_t percent) override;
 
  private:
+#if SOC_LCD_RGB_SUPPORTED
   static bool on_color_done(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* ctx);
+#endif
   LcdConfig cfg_{};
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
@@ -225,7 +232,9 @@ class ParallelDisplay final : public hg::Display {
  private:
   static bool on_trans_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t* edata, void* ctx);
   LcdConfig cfg_{};
+#if SOC_LCD_I80_SUPPORTED
   esp_lcd_i80_bus_handle_t i80_ = nullptr;
+#endif
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   uint16_t* fb_ = nullptr;

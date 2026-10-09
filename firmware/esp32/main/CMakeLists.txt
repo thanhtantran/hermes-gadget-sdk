@@ -4,6 +4,11 @@ if(NOT CMAKE_SCRIPT_MODE_FILE)
     configure_file(wifi_setup_page.hpp.in wifi_setup_page.hpp @ONLY)
 endif()
 
+set(hg_rgb_components "")
+if(IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4")
+    list(APPEND hg_rgb_components esp_lcd_st7701 esp_lcd_panel_io_additions)
+endif()
+
 idf_component_register(
     SRCS
         "main.cpp"
@@ -45,8 +50,8 @@ idf_component_register(
         esp_adc
         esp_event
         esp_lcd
-        esp_lcd_st7701
-        esp_lcd_panel_io_additions
+        esp_lcd_ili9341
+        ${hg_rgb_components}
         esp_netif
         esp_http_server
         esp_psram
