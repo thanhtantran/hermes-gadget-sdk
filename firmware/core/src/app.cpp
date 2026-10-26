@@ -11,6 +11,29 @@
 namespace hg {
 namespace {
 
+// `v` when it is a whole number in [lo, hi], else -1. The range is checked on the double, before any
+// cast: a cast of one out of int64_t's range is undefined.
+int64_t whole_in(const json::Value& v, int64_t lo, int64_t hi) {
+  const double d = v.as_number(-1);
+  if (!(d >= static_cast<double>(lo) && d <= static_cast<double>(hi))) return -1;
+  const auto n = static_cast<int64_t>(d);
+  return static_cast<double>(n) == d ? n : -1;
+}
+
+// A face.start band, [first row, rows], into `out`; absent leaves it with no rows. False when it is not
+// two whole numbers inside a px-row face.
+bool band_in(const json::Value& v, int px, mascot::Band& out) {
+  if (v.is_null()) return true;
+  const auto& e = v.elements();
+  if (e.size() != 2) return false;
+  const int64_t y = whole_in(e[0], 0, px - 1);
+  const int64_t rows = y < 0 ? -1 : whole_in(e[1], 1, px - y);
+  if (rows < 0) return false;
+  out.y = static_cast<uint16_t>(y);
+  out.rows = static_cast<uint16_t>(rows);
+  return true;
+}
+
 constexpr uint32_t kBootScreenMs = 800;
 constexpr uint32_t kConnectTimeoutMs = 10000;
 constexpr uint32_t kHandshakeTimeoutMs = 10000;
@@ -19,7 +42,6 @@ constexpr uint32_t kMinUtteranceMs = 350;
 constexpr uint32_t kMaxUtteranceMs = 30000;
 constexpr uint32_t kThinkingTimeoutMs = 180000;
 constexpr uint32_t kSettleAfterReplyMs = 6000;
-constexpr uint32_t kReplyLingerMs = 20000;    // reply text stays up this long before the mascot returns
 constexpr uint32_t kNewSessionHoldMs = 2000;  // hold CANCEL this long to start a new session
 constexpr uint32_t kNewSessionHintMs = 600;   // ...and show the countdown after this long
 constexpr uint32_t kPromptArmMs = 600;        // presses this soon after a question appears don't answer it
@@ -39,7 +61,8 @@ constexpr uint32_t kOtaRestartMs = 1000;    // time for ota.done to leave before
 constexpr uint32_t kBackoffMs[] = {1000, 2000, 4000, 8000, 15000, 30000};
 constexpr size_t kBackoffSteps = sizeof(kBackoffMs) / sizeof(kBackoffMs[0]);
 
-const char* const kSettingKeys[] = {"name", "server", "token", "talk_mode", "volume", "brightness", "screen_timeout", "battery_display", "battery_estimate", "language", "wifi_ssid", "wifi_pass"};
+const char* const kSettingKeys[] = {"name", "server", "token", "talk_mode", "volume", "brightness", "screen_timeout", "battery_display", "battery_estimate", "language", "wifi_ssid", "wifi_pass",
+                                    "face_down_sleep", "clock", "time_format"};
 
 // NVS limits storage keys to 15 characters; keep the public setting name unchanged.
 std::string_view setting_storage_key(std::string_view key) {
@@ -83,11 +106,27 @@ bool same_secret(std::string_view a, std::string_view b) {
   return diff == 0;
 }
 
+// The clock face's time: 24-hour HH:MM, or 12-hour H:MM (midnight is 12), with no AM/PM.
+std::string clock_time_text(const WallTime& w, bool h24) {
+  char buf[8];  // room for any two uint8_t fields: the ESP-IDF compiler checks the worst case
+  if (h24) std::snprintf(buf, sizeof buf, "%02u:%02u", unsigned(w.hour), unsigned(w.minute));
+  else std::snprintf(buf, sizeof buf, "%u:%02u", unsigned(w.hour % 12 ? w.hour % 12 : 12), unsigned(w.minute));
+  return buf;
+}
+
 std::string lower(std::string s) {
   for (char& c : s) {
     if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
   }
   return s;
+}
+
+// The last two lines of `text` wrapped to `cols`, blank lines skipped.
+std::string latest_lines(const std::string& text, int cols) {
+  std::vector<std::string> lines = wrap_text(text, cols);
+  lines.erase(std::remove(lines.begin(), lines.end(), std::string()), lines.end());
+  if (lines.size() > 2) lines.erase(lines.begin(), lines.end() - 2);
+  return lines.empty() ? std::string() : lines.size() == 1 ? lines[0] : lines[0] + "\n" + lines[1];
 }
 
 }  // namespace
@@ -107,7 +146,8 @@ const App::Route App::kRoutes[] = {
     {"prompt.close", &App::h_prompt_close}, {"ota.offer", &App::h_ota_offer},
     {"ota.begin", &App::h_ota_begin},     {"ota.end", &App::h_ota_end},
     {"ota.abort", &App::h_ota_abort},     {"dashboard", &App::h_dashboard},
-    {"profile", &App::h_profile},
+    {"profile", &App::h_profile},         {"face", &App::h_face},
+    {"face.start", &App::h_face_start},   {"face.end", &App::h_face_end},
 };
 
 App::App(Hal& hal, DeviceProfile profile) : hal_(hal), profile_(std::move(profile)) {}
@@ -132,7 +172,7 @@ void App::load_settings() {
   volume_ = static_cast<uint8_t>(std::max(0, std::min(100, vol)));
   if (hal_.speaker) hal_.speaker->set_volume(volume_);
   brightness_ = static_cast<uint8_t>(std::max(5, std::min(100, std::atoi(setting("brightness", "100").c_str()))));
-  if (hal_.display && hal_.display->info().has_backlight) hal_.display->set_backlight(brightness_);
+  // The panel level itself is applied once, below, after the sleep flags clear.
   screen_timeout_ms_ = static_cast<uint32_t>(std::max(0, std::min(3600, std::atoi(setting("screen_timeout", "0").c_str())))) * 1000;
   const std::string indicator = setting("battery_display", "off");
   battery_display_ = indicator == "icon" ? BatteryIndicator::Icon
@@ -142,8 +182,14 @@ void App::load_settings() {
   const std::string language = setting("language", "en");
   lang_auto_ = language == "auto";
   lang_ = lang_auto_ ? hermes_lang_.value_or(i18n::Lang::En) : i18n::parse(language).value_or(i18n::Lang::En);
+  face_down_sleep_ = setting("face_down_sleep", "off") == "on";
+  clock_after_ms_ = static_cast<uint32_t>(std::max(0, std::min(3600, std::atoi(setting("clock", "0").c_str())))) * 1000;
+  clock_24h_ = setting("time_format", "24h") != "12h";
+  if (face_down_) return;  // a face-down screen stays dark until the gadget is turned over
   activity_at_ = now();
   display_dimmed_ = display_sleeping_ = false;
+  clock_showing_ = false;  // a setting change is activity: the clock starts its rest again
+  apply_backlight();
 }
 
 void App::add_action(Action action) {
@@ -213,8 +259,10 @@ void App::begin() {
         return false;
       }
       int p = static_cast<int>(std::max<int64_t>(5, std::min<int64_t>(100, args["percent"].as_int())));
-      hal_.display->set_backlight(static_cast<uint8_t>(p));
       brightness_ = static_cast<uint8_t>(p);
+      // Face down, the level is only stored: the turn-over (wake_display) applies it.
+      // A dimmed or timed-out screen keeps its level too; the wake applies the new one.
+      if (!face_down_) apply_backlight();
       if (hal_.storage && !hal_.storage->set("brightness", std::to_string(p))) log(LogLevel::Warn, "could not save brightness");
       result.set("percent", p);
       return true;
@@ -255,6 +303,16 @@ void App::begin() {
 
   add_timer_actions();  // timer.start/status/cancel, beside the built-in actions
   if (hal_.display) ui_ = std::make_unique<Ui>(*hal_.display);
+  if (ui_ && profile_.faces && profile_.colour_face_alloc && !colour_) {
+    const int px = std::min(256, ui_->face_px());
+    const size_t row = static_cast<size_t>(px) * 2;
+    // The picture and half as many rows again for its bands; else the picture alone, which stays still.
+    colour_.reset(static_cast<uint16_t*>(profile_.colour_face_alloc(row * static_cast<size_t>(px + px / 2))));
+    colour_bands_ = colour_ ? px / 2 : 0;
+    if (!colour_) colour_.reset(static_cast<uint16_t*>(profile_.colour_face_alloc(row * static_cast<size_t>(px))));
+    colour_px_ = colour_ ? px : 0;
+    if (!colour_) log(LogLevel::Warn, "no room for a colour face: one-colour faces only");
+  }
   if (ui_ && profile_.touch_screen)  // about 7 mm: 7 * ppi / 25.4, rounded up
     ui_->set_touch_px((70 * (profile_.touch_ppi ? profile_.touch_ppi : DeviceProfile::kDefaultTouchPpi) + 253) / 254);
   if (profile_.frame_stats) set_frame_stats(true);
@@ -335,6 +393,7 @@ void App::drop_session(std::string_view reason) {
   mode_ = Mode::Idle;
   overlay_ = Overlay::None;
   image_stream_ = -1;
+  face_in_.reset();  // a colour face cut short; a whole one stays for the welcome to keep
   // What the dashboard showed is stale now; the next connection sends it afresh.
   dashboard_ready_ = false;
   dash_rows_.clear();
@@ -421,6 +480,11 @@ void App::send_hello() {
     caps.set("dashboard", dash);
   }
   caps.set("profiles", true);
+  if (ui_ && profile_.faces) {
+    json::Value colour = json::Value::object().set("v", 2).set("px", colour_px_);
+    if (colour_bands_) colour.set("frames", true);
+    caps.set("faces", colour_px_ ? std::move(colour) : json::Value(1));
+  }
   if (hal_.updater) {
     json::Value ota = json::Value::object();
     ota.set("max_size", hal_.updater->capacity());
@@ -447,6 +511,7 @@ void App::send_hello() {
       .set("sensors", sensors);
   const std::string stored = setting("profile", "");  // only what Hermes confirmed, never what it showed
   if (!stored.empty()) hello.set("profile", stored);
+  if (face_) hello.set("face", face_->hash);
   if (!access_token_.empty()) hello.set("token", access_token_);
   if (display_sleeping_) hello.set("display_sleeping", true);
   send(hello);
@@ -493,6 +558,7 @@ void App::h_welcome(const json::Value& m) {
   online_since_ = now();
   attempts_ = 0;
   paired_ = m["paired"].as_bool();
+  unpaired_reason_.clear();  // the server says it again on this connection if it still holds
   // Hermes's language, for a device whose `language` is auto (docs/protocol.md#welcome-server--device).
   hermes_lang_ = hermes_language(m["language"].str_or(""));
   if (lang_auto_) lang_ = hermes_lang_.value_or(i18n::Lang::En);
@@ -502,6 +568,8 @@ void App::h_welcome(const json::Value& m) {
     pairing_code_.clear();
     pairing_command_.clear();
   }
+  // The held face stays only if the welcome names it, paired (else revoked, or a new route: the mascot).
+  if (face_ && (!paired_ || m["face"].as_string() != face_->hash)) face_.reset();
   log(LogLevel::Info, paired_ ? "online (paired)" : "online (waiting for pairing approval)");
   agent_profiles_.clear();
   for (const auto& p : m["profiles"].elements()) {
@@ -534,6 +602,89 @@ void App::h_profile(const json::Value& m) {
                                            : i18n::Msg::ProfileRefused));
 }
 
+void App::h_face(const json::Value& m) {
+  // A face or a clear for another profile is late: it must not touch this profile's face.
+  if (!profile_.faces || !paired_ || m["profile"].as_string() != agent_profile_) return;
+  drop_face();
+  const std::string& bits = m["bits"].as_string();
+  if (bits.empty()) return;
+  const std::string& hash = m["hash"].as_string();
+  mascot::Face face;
+  if (hash.empty() || hash.size() > 64 || !mascot::parse(bits, face)) {
+    log(LogLevel::Warn, "ignored a malformed face");
+    return;
+  }
+  face.hash = hash;
+  face_ = std::move(face);
+}
+
+void App::drop_face() {
+  face_.reset();
+  face_in_.reset();
+}
+
+// A colour face: checked whole before a byte of it is kept, then its pixels on channel 4 (face_chunk)
+// go straight into colour_, and face.end shows it. The mascot shows meanwhile.
+void App::h_face_start(const json::Value& m) {
+  if (!colour_px_ || !paired_ || m["profile"].as_string() != agent_profile_) return;
+  drop_face();
+  const std::string& hash = m["hash"].as_string();
+  const auto& a = m["anchors"].elements();
+  int64_t v[10] = {};
+  bool ok = a.size() == 10;
+  for (size_t i = 0; ok && i < 10; ++i) ok = (v[i] = whole_in(a[i], 0, 1000)) >= 0;
+  mascot::Anchors anchors;
+  const int64_t stream = whole_in(m["stream"], 0, 255);
+  mascot::Band blink, talk;
+  ok = ok && band_in(m["blink"], colour_px_, blink) && band_in(m["talk"], colour_px_, talk) &&
+       blink.rows + talk.rows <= colour_bands_;
+  if (!ok || !mascot::make_anchors(v, anchors) || hash.empty() || hash.size() > 64 || stream < 0 ||
+      whole_in(m["width"], colour_px_, colour_px_) < 0 || whole_in(m["height"], colour_px_, colour_px_) < 0 ||
+      m["format"].as_string() != "rgb565") {
+    log(LogLevel::Warn, "ignored a malformed colour face");
+    return;
+  }
+  face_in_ = FaceTransfer{static_cast<int>(stream), hash, anchors, blink, talk};
+}
+
+// The bytes of the colour face face_in_ brings: the picture, then its bands.
+size_t App::face_bytes() const {
+  return static_cast<size_t>(colour_px_) * (colour_px_ + face_in_->blink.rows + face_in_->talk.rows) * 2;
+}
+
+void App::face_chunk(uint8_t stream, uint16_t seq, const uint8_t* data, size_t len) {
+  if (!face_in_ || stream != face_in_->stream) return;
+  const size_t total = face_bytes();
+  if (seq != face_in_->seq || len > total - face_in_->got) {
+    log(LogLevel::Warn, "dropped a colour face: a chunk out of place");
+    face_in_.reset();
+    return;
+  }
+  // The wire is little-endian RGB565, as the framebuffer's native order is on every target.
+  std::memcpy(reinterpret_cast<uint8_t*>(colour_.get()) + face_in_->got, data, len);
+  face_in_->got += len;
+  ++face_in_->seq;
+}
+
+void App::h_face_end(const json::Value& m) {
+  if (!face_in_ || whole_in(m["stream"], 0, 255) != face_in_->stream) return;
+  if (face_in_->got == face_bytes()) {
+    mascot::Face face;
+    face.hash = face_in_->hash;
+    face.rgb565 = colour_.get();
+    face.px = static_cast<uint16_t>(colour_px_);
+    face.blink = face_in_->blink;
+    face.blink.rgb565 = face.rgb565 + colour_px_ * colour_px_;
+    face.talk = face_in_->talk;
+    face.talk.rgb565 = face.blink.rgb565 + colour_px_ * face.blink.rows;
+    face.anchors = face_in_->anchors;
+    face_ = std::move(face);
+  } else {
+    log(LogLevel::Warn, "dropped a colour face that ended short");
+  }
+  face_in_.reset();
+}
+
 // The notice line and the open settings item; not the hint bar, which settings hides.
 void App::profile_notice(std::string text) {
   if (menu_ == Menu::Profile) check_result_ = text;
@@ -543,6 +694,7 @@ void App::profile_notice(std::string text) {
 
 void App::set_agent_profile(const std::string& id) {
   if (id.empty()) return;
+  if (id != agent_profile_) drop_face();  // the mascot until the new profile's face arrives
   agent_profile_ = id;
   if (!hal_.storage || setting("profile", "default") == id) return;
   if (id == "default") hal_.storage->erase("profile");
@@ -599,6 +751,13 @@ bool App::open_profile_picker() {
   return true;
 }
 
+bool App::show_reply_text() {
+  if (model_.screen != Screen::Responding || !model_.hero || reply_.empty()) return false;
+  reply_shown_ = true;
+  update_model();
+  return true;
+}
+
 int App::profile_row_hit(int x, int y) const { return ui_ ? ui_->profile_row_hit(model_, x, y) : -1; }
 
 void App::profile_tap(int x, int y) {
@@ -615,17 +774,25 @@ void App::h_pairing(const json::Value& m) {
   paired_ = false;
   pairing_code_ = m["code"].as_string();
   pairing_command_ = m["command"].as_string();
+  unpaired_reason_.clear();
 }
 
 void App::h_paired(const json::Value&) {
   paired_ = true;
   pairing_code_.clear();
   pairing_command_.clear();
+  unpaired_reason_.clear();
   set_hint_flash(tr(i18n::Msg::PairedWithHermes));
 }
 
-void App::h_unpaired(const json::Value&) {
+void App::h_unpaired(const json::Value& m) {
   paired_ = false;
+  unpaired_reason_ = m["reason"].as_string();
+  if (unpaired_reason_ == "routed") {  // no code can let it in: drop one shown before
+    pairing_code_.clear();
+    pairing_command_.clear();
+  }
+  drop_face();
   mode_ = Mode::Idle;
   stop_playback();
 }
@@ -681,6 +848,7 @@ void App::h_transcript(const json::Value& m) {
 
 void App::h_reply_delta(const json::Value& m) {
   wake_display();
+  if (face_down_) reply_while_face_down_ = true;  // shown from the top on the turn-over
   if (mode_ == Mode::Listening) return;
   reply_ = m["text"].as_string();
   scroll_ = -1;
@@ -693,6 +861,7 @@ void App::h_reply_delta(const json::Value& m) {
 
 void App::h_reply(const json::Value& m) {
   wake_display();
+  if (face_down_ && !m["interim"].as_bool()) reply_while_face_down_ = true;
   last_turn_rx_ = now();
   const std::string& text = m["text"].as_string();
   if (m["interim"].as_bool()) {
@@ -710,6 +879,7 @@ void App::h_reply(const json::Value& m) {
 }
 
 void App::h_audio_start(const json::Value& m) {
+  if (face_down_) return;  // face down mutes Hermes; the stream is never begun, its frames are dropped
   alarm_ringing_ = false;  // Hermes speaks now: the alarm stays on screen, quiet
   close_setup_screens();
   wake_display();
@@ -763,6 +933,10 @@ void App::on_transport_binary(const uint8_t* data, size_t len) {
   last_rx_ = now();
   proto::BinaryFrame f;
   if (!proto::parse_binary(data, len, f)) return;
+  if (f.channel == proto::Channel::Face) {
+    face_chunk(f.stream, f.seq, f.payload, f.payload_len);
+    return;
+  }
   if (f.channel == proto::Channel::Firmware) {
     const Ota before = ota_;
     ota_chunk(f.stream, f.seq, f.payload, f.payload_len);
@@ -1101,6 +1275,7 @@ void App::on_button(Button button, bool pressed) {
     case Button::Down:
       if (!pressed) break;
       if (prompt_showing()) break;
+      if (show_reply_text()) return;
       page_at_ = now() + kManualScrollPauseMs;
       if (mode_ == Mode::Idle && overlay_ == Overlay::None && !reply_.empty() &&
           static_cast<int32_t>(reply_until_ - now()) <= 0) {
@@ -1559,6 +1734,8 @@ void App::h_ota_abort(const json::Value&) {
 void App::tick() {
   const uint32_t t = now();
   power_tick();
+  motion_tick();
+  clock_tick();
   settings_tick();
   phone_tick();
 
@@ -1658,6 +1835,8 @@ void App::tick() {
     update_model();
   }
 
+  // Text that follows a hero screen, such as a reply after its speech, gets its first page's reading time.
+  if (model_.hero) page_at_ = t + page_dwell_ms();
   if (static_cast<int32_t>(t - page_at_) >= 0) {
     page_at_ = t + page_dwell_ms();
     if (turn_page()) update_model();
@@ -1670,6 +1849,8 @@ void App::tick() {
 
   if (t - frame_at_ >= kFrameMs) {
     frame_at_ = t;
+    // The port's time of day feeds the clock face; read once per frame.
+    wall_valid_ = hal_.system && hal_.system->wall_time(wall_);
     ++model_.frame;
     update_model();
   }
@@ -1677,14 +1858,18 @@ void App::tick() {
 
 void App::update_model() {
   UiModel& m = model_;
+  if (mode_ != Mode::Responding) reply_shown_ = false;
   m.title = name_;
   m.lang = lang_;
   m.code.clear();
+  m.clock_time.clear();
+  m.clock_date.clear();
   m.detail.clear();
   m.body.clear();
   m.yes.clear();
   m.no.clear();
   m.qr = nullptr;
+  m.face = face_ ? &*face_ : nullptr;
   m.dash.clear();
   m.hero = false;
   m.name_target = false;
@@ -1823,15 +2008,19 @@ void App::update_model() {
     m.screen = Screen::Pairing;
     m.hero = true;
     m.caption_lines = kCaptionLines;
+    m.hint = tr(Msg::WaitingForApproval);
     if (!pairing_code_.empty()) {
       m.code = pairing_code_;
       m.headline = tr(Msg::PairingCode, {pairing_code_});
       m.detail = tr(Msg::RunOnHost, {pairing_command_});
+    } else if (unpaired_reason_ == "routed") {  // no code can let it in; removing the route can
+      m.headline = tr(Msg::RefusedByRoute);
+      m.detail = tr(Msg::RemoveRouteOnHost);
+      m.hint = device_id_;  // what the route's user_id matches
     } else {
       m.headline = tr(Msg::PairThisDevice);
       m.detail = tr(Msg::AskingForCode);
     }
-    m.hint = tr(Msg::WaitingForApproval);
   } else if (mode_ == Mode::Listening) {
     m.screen = Screen::Listening;
     m.hero = true;
@@ -1901,6 +2090,19 @@ void App::update_model() {
     m.hint = profile_.touch_screen ? std::string(tr(Msg::HoldToReply)) : tr(Msg::ButtonToReply, {talk});
     // Spoken audio can start before the text arrives: let the mascot talk meanwhile.
     m.hero = reply_.empty();
+    // While it is spoken, the face talks over the reply's latest two lines, where they fit.
+    if (m.speaking && !reply_shown_ && ui_ && ui_->talk_caption_fits()) {
+      m.hero = true;
+      m.caption_lines = 2;
+      const std::string& text = reply_.empty() ? status_ : reply_;
+      const int cols = ui_->layout().hero_cols;
+      if (text != caption_text_ || cols != caption_cols_) {
+        caption_text_ = text;
+        caption_cols_ = cols;
+        caption_ = latest_lines(text, cols);
+      }
+      m.detail = caption_;
+    }
   } else {
     m.screen = Screen::Ready;
     m.headline = tr(Msg::Ready);
@@ -1928,6 +2130,21 @@ void App::update_model() {
                    ((sessions || timing) ? "\n" + m.detail : "");
         m.caption_lines = 2;
       }
+    }
+    if (clock_showing_) {
+      // The resting clock owns the whole panel: the time, the date and the mascot.
+      m.screen = Screen::Clock;
+      m.clock_time = clock_time_text(wall_, clock_24h_);
+      m.clock_date = tr(Msg::ClockDate,
+                        {tr(static_cast<Msg>(static_cast<int>(Msg::WeekdaySun) + std::min<unsigned>(wall_.weekday, 6))),
+                         tr(static_cast<Msg>(static_cast<int>(Msg::MonthJan) + std::clamp<int>(wall_.month, 1, 12) - 1)),
+                         std::to_string(wall_.day)});
+      m.clock_minute = wall_.minute;
+      m.hero = false;
+      m.name_target = false;
+      m.hint.clear();
+      m.detail.clear();
+      m.body.clear();
     }
   }
   bool keeps_detail = m.screen == Screen::Pairing || m.screen == Screen::Boot || m.screen == Screen::Prompt ||
@@ -1966,10 +2183,12 @@ json::Value App::status_value() const {
       .set("server", server_url_)
       .set("network", network_up_);
   s.set("display_sleeping", display_sleeping_);
+  if (can_sleep_face_down()) s.set("face_down", face_down_);
   // The language the screen is in, and whether it follows Hermes's (`language` auto).
   s.set("language", i18n::info(lang_).code).set("language_auto", lang_auto_);
   if (hal_.power) s.set("power", power_value());
   if (!pairing_code_.empty()) s.set("pairing_code", pairing_code_);
+  if (!unpaired_reason_.empty()) s.set("unpaired_reason", unpaired_reason_);
   if (!prompt_id_.empty()) s.set("prompt", prompt_id_);
   if (timer_active()) s.set("timer", timer_value());
   if (on_phone_pair) s.set("phone", phone_value());
@@ -2074,6 +2293,14 @@ std::string App::console(std::string_view raw) {
       return "@error battery_display must be icon, percentage, both or off";
     if (key == "battery_estimate" && !value.empty() && value != "off" && value != "liion")
       return "@error battery_estimate must be off or liion";
+    if (key == "face_down_sleep" && !value.empty() && value != "on" && value != "off")
+      return "@error face_down_sleep must be on or off";
+    if (key == "clock" && !value.empty() &&
+        (value.size() > 4 || value.find_first_not_of("0123456789") != std::string::npos ||
+         (std::atoi(value.c_str()) != 0 && (std::atoi(value.c_str()) < 5 || std::atoi(value.c_str()) > 3600))))
+      return "@error clock must be 0 (off) or 5..3600 seconds";
+    if (key == "time_format" && !value.empty() && value != "12h" && value != "24h")
+      return "@error time_format must be 12h or 24h";
     if (key == "language" && !value.empty() && value != "auto" && !i18n::parse(value))
       return "@error language must be one of:" + language_codes();
     if (!hal_.storage) return "@error no storage";

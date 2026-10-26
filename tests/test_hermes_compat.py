@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 import types
@@ -82,6 +83,37 @@ def test_the_adapter_only_uses_listed_private_hooks():
     used = set(re.findall(r"(?:self|super\(\))\.(_[a-z][a-z_]*)\b", source))
     inherited = {name for name in used - own if not name.startswith("__")}
     assert inherited <= set(compat.ADAPTER_HOOKS), sorted(inherited - set(compat.ADAPTER_HOOKS))
+
+
+def _module_level_imports(node):
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.Import, ast.ImportFrom)):
+            yield child
+        elif not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _module_level_imports(child)
+
+
+def test_every_module_level_hermes_import_is_listed():
+    """A module-level import the table lacks fails right after compat.check passes, without its message."""
+    own_dependencies = {"websockets", "PIL"}  # pyproject.toml: websockets, and Pillow in the images extra
+    examined, unlisted = 0, []
+    for path in sorted((REPO / "plugin").glob("*.py")):
+        for node in _module_level_imports(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                imports = [(alias.name, ()) for alias in node.names]
+            elif node.level == 0:
+                imports = [(node.module, tuple(alias.name for alias in node.names))]
+            else:
+                continue
+            for module, names in imports:
+                if module.split(".")[0] in sys.stdlib_module_names | own_dependencies:
+                    continue
+                examined += 1
+                listed = compat.IMPORTS.get(module)
+                if listed is None or not set(names) <= set(listed):
+                    unlisted.append(f"{path.name}: {module} {[n for n in names if n not in (listed or ())]}")
+    assert examined, "no Hermes import found in plugin/*.py"
+    assert not unlisted, f"not in compat.IMPORTS: {unlisted}"
 
 
 @requires_hermes

@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import json
 import math
 import struct
 import wave
@@ -281,3 +282,230 @@ def test_long_enough_utterance_still_reaches_the_delegate():
         assert device.sent == []
 
     asyncio.run(run())
+
+
+# -- faces -------------------------------------------------------------------------------
+
+class _Wire:
+    """A device's socket: records what the hub sends."""
+
+    remote_address = ("127.0.0.1", 1)
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, raw):
+        self.sent.append(json.loads(raw))
+
+
+def _slow_face_session(tmp_path, hub=None):
+    """A paired, current session on default whose face is made only once ``delegate.release`` is set."""
+    from hermes_gadget_plugin.face import ProfileFace
+    from hermes_gadget_plugin.hub import DeviceHub, DeviceSession, HubDelegate
+
+    class SlowDefault(HubDelegate):
+        def __init__(self):
+            self.release = asyncio.Event()
+
+        async def face(self, session):
+            if session.profile != "default":
+                return None
+            await self.release.wait()
+            return ProfileFace.of(b"the default profile's face")
+
+    delegate, wire = SlowDefault(), _Wire()
+    hub = hub or DeviceHub(DeviceStore(tmp_path), delegate)
+    session = DeviceSession(hub, wire, {"device_id": "hg-1", "caps": {"faces": 1}})
+    session.paired = True
+    hub.sessions[session.device_id] = session
+    return session, hub.delegate, wire
+
+
+def test_a_face_that_arrives_after_a_profile_switch_is_not_sent(tmp_path):
+    """The switch sends the new profile's face; a slow face for the old one must never follow it."""
+
+    async def main():
+        session, delegate, wire = _slow_face_session(tmp_path)
+        first = session.update_face()  # as after welcome, on default
+        await asyncio.sleep(0)
+        session.profile = "ops"
+        await session.send_profile()
+        delegate.release.set()
+        await asyncio.gather(first, session._face_task, return_exceptions=True)
+        return wire.sent
+
+    assert asyncio.run(main()) == [{"type": "profile", "profile": "ops"}]
+
+
+def test_a_face_that_arrives_after_the_device_is_unpaired_is_not_sent(tmp_path):
+    async def main():
+        session, delegate, wire = _slow_face_session(tmp_path)
+        first = session.update_face()
+        await asyncio.sleep(0)
+        await session.set_paired(False)  # revoked while the face was being made
+        delegate.release.set()
+        await asyncio.gather(first, session._face_task, return_exceptions=True)
+        return wire.sent, session.face_hash
+
+    assert asyncio.run(main()) == ([{"type": "unpaired"}], None)
+
+
+def test_a_face_made_for_a_replaced_connection_is_dropped(tmp_path):
+    """A reconnect replaces the connection while its face is still being made: only the new one answers."""
+
+    async def main():
+        old, delegate, old_wire = _slow_face_session(tmp_path)
+        first = old.update_face()
+        await asyncio.sleep(0)
+        new, _, new_wire = _slow_face_session(tmp_path, old.hub)  # the hub's sessions now name the new one
+        await old.close("replaced by a newer connection")
+        delegate.release.set()
+        await asyncio.gather(first, new.update_face(), return_exceptions=True)
+        return [m["type"] for m in old_wire.sent], [m["type"] for m in new_wire.sent], new.face_hash
+
+    old_sent, new_sent, held = asyncio.run(main())
+    assert "face" not in old_sent and new_sent == ["face"] and held is not None
+
+
+class _MediaWire(_Wire):
+    """A device's socket that also records binary frames."""
+
+    async def send(self, raw):
+        self.sent.append(raw if isinstance(raw, bytes) else json.loads(raw))
+
+
+@pytest.mark.parametrize("faces, px", [(1, 0), ({"v": 2, "px": 144}, 144), ({"v": 2, "px": 999}, 0),
+                                       ({"v": 2, "px": True}, 0), ({"v": 2}, 0), (None, 0)])
+def test_a_device_says_whether_it_draws_faces_and_at_what_size(faces, px):
+    from hermes_gadget_plugin.hub import DeviceSession
+
+    session = DeviceSession(None, _Wire(), {"device_id": "hg-1", "caps": {"faces": faces}})
+    assert session.face_px == px
+    assert session.shows_faces() == (faces == 1 or px > 0)
+
+
+def test_a_colour_face_goes_as_face_start_chunks_and_face_end(tmp_path):
+    from hermes_gadget_plugin.face import ColourFace, ProfileFace
+    from hermes_gadget_plugin.hub import DeviceHub, DeviceSession, HubDelegate
+    from hermes_gadget_plugin.protocol import CHANNEL_FACE, parse_binary
+
+    anchors = (607, 293, 262, 620, 801, 107, 396, 508, 586, 649)
+    colour = ColourFace(px=64, rgb565=bytes(range(256)) * 32, anchors=anchors)
+
+    class Colour(HubDelegate):
+        async def face(self, session):
+            return ProfileFace("c0ffee", lambda: colour)
+
+    async def main():
+        wire = _MediaWire()
+        hub = DeviceHub(DeviceStore(tmp_path), Colour())
+        session = DeviceSession(hub, wire, {"device_id": "hg-1", "caps": {"faces": {"v": 2, "px": 64}}})
+        session.paired = True
+        session.face_hash = "an older face"
+        hub.sessions[session.device_id] = session
+        await session.update_face()
+        return session, wire.sent
+
+    session, sent = asyncio.run(main())
+    start, *chunks, end = sent
+    assert start == {"type": "face.start", "stream": start["stream"], "profile": "default", "hash": "c0ffee",
+                     "width": 64, "height": 64, "format": "rgb565", "anchors": list(colour.anchors)}
+    frames = [parse_binary(c) for c in chunks]
+    assert [(f.channel, f.stream, f.seq) for f in frames] == [(CHANNEL_FACE, start["stream"], i) for i in range(2)]
+    assert b"".join(f.payload for f in frames) == colour.rgb565
+    assert end == {"type": "face.end", "stream": start["stream"]}
+    assert session.face_hash == "c0ffee"
+
+
+@pytest.mark.parametrize("faces, frames", [({"v": 2, "px": 144, "frames": True}, True), ({"v": 2, "px": 144}, False),
+                                           ({"v": 2, "px": 144, "frames": 1}, False),
+                                           ({"v": 2, "frames": True}, False), (1, False)])
+def test_a_device_says_whether_it_draws_blink_and_talk_frames(faces, frames):
+    from hermes_gadget_plugin.hub import DeviceSession
+
+    assert DeviceSession(None, _Wire(), {"device_id": "hg-1", "caps": {"faces": faces}}).face_frames is frames
+
+
+def test_a_moving_colour_face_names_its_bands_and_sends_them_after_the_idle_picture(tmp_path):
+    from hermes_gadget_plugin.face import ColourFace, ProfileFace
+    from hermes_gadget_plugin.hub import DeviceHub, DeviceSession, HubDelegate
+    from hermes_gadget_plugin.protocol import parse_binary
+
+    idle, blink, talk = bytes([1]) * 64 * 64 * 2, bytes([2]) * 64 * 2 * 5, bytes([3]) * 64 * 2 * 3
+    colour = ColourFace(px=64, rgb565=idle, anchors=(607, 293, 262, 620, 801, 107, 396, 508, 586, 649),
+                        blink=(20, 5, blink), talk=(40, 3, talk))
+
+    class Colour(HubDelegate):
+        async def face(self, session):
+            return ProfileFace("moving", lambda: colour)
+
+    async def main():
+        wire = _MediaWire()
+        hub = DeviceHub(DeviceStore(tmp_path), Colour())
+        session = DeviceSession(hub, wire, {"device_id": "hg-1",
+                                            "caps": {"faces": {"v": 2, "px": 64, "frames": True}}})
+        session.paired = True
+        hub.sessions[session.device_id] = session
+        await session.update_face()
+        return wire.sent
+
+    start, *chunks, end = asyncio.run(main())
+    assert (start["type"], start["blink"], start["talk"], end["type"]) == ("face.start", [20, 5], [40, 3], "face.end")
+    assert b"".join(parse_binary(c).payload for c in chunks) == idle + blink + talk
+
+
+@pytest.mark.parametrize("held_at", ["face.start", "face.end"])
+def test_a_colour_face_cut_off_mid_send_is_cleared_when_the_profile_has_none(tmp_path, held_at):
+    """The device may hold the old face, the new one, or nothing: a later "no face" must clear it."""
+    from hermes_gadget_plugin.face import ColourFace, ProfileFace
+    from hermes_gadget_plugin.hub import DeviceHub, DeviceSession, HubDelegate
+
+    colour = ColourFace(px=64, rgb565=bytes(64 * 64 * 2), anchors=(607, 293, 262, 620, 801, 107, 396, 508, 586, 649))
+
+    class HeldWire(_MediaWire):
+        """Takes each message, but holds the socket at ``held_at`` until released."""
+
+        def __init__(self):
+            super().__init__()
+            self.holding, self.release = asyncio.Event(), asyncio.Event()
+
+        async def send(self, raw):
+            await super().send(raw)
+            if not isinstance(raw, bytes) and self.sent[-1]["type"] == held_at:
+                self.holding.set()
+                await self.release.wait()
+
+    async def main():
+        wire = HeldWire()
+        hub = DeviceHub(DeviceStore(tmp_path), HubDelegate())
+        session = DeviceSession(hub, wire, {"device_id": "hg-1", "caps": {"faces": {"v": 2, "px": 64}}})
+        session.paired = True
+        session.face_hash = "already-on-device"
+        hub.sessions[session.device_id] = session
+        state = session.face_state()
+        first = session.update_face(ProfileFace("new-colour", lambda: colour), state)
+        await wire.holding.wait()
+        second = session.update_face(None, state)  # the profile has no face now: the mascot
+        wire.release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        return session, wire.sent
+
+    session, sent = asyncio.run(main())
+    assert sent[-1] == {"type": "face", "profile": "default"}  # cleared, whatever the device holds
+    assert session.face_hash is None
+
+
+def test_a_face_found_before_an_unpair_is_not_sent_after_it(tmp_path):
+    """The welcome's face was found while paired; an unpair during the welcome's send must not let it go out."""
+    from hermes_gadget_plugin.face import ProfileFace
+
+    async def main():
+        session, delegate, wire = _slow_face_session(tmp_path)
+        found_for = session.face_state()
+        found = ProfileFace.of(b"the default profile's face")
+        session.paired = False  # revoked while the welcome was being sent
+        delegate.release.set()
+        await session.update_face(found, found_for)
+        return wire.sent
+
+    assert asyncio.run(main()) == []

@@ -12,7 +12,7 @@ This is the contract between a device and the gadget plugin running inside the H
 
   | Offset | Size | Field                                 |
   |--------|------|---------------------------------------|
-  | 0      | u8   | channel: `0x01` audio, `0x02` image, `0x03` firmware |
+  | 0      | u8   | channel: `0x01` audio, `0x02` image, `0x03` firmware, `0x04` face |
   | 1      | u8   | stream id (from the matching `*.start` or `ota.offer`) |
   | 2      | u16 LE | sequence number (wraps)             |
   | 4      | ...  | payload                               |
@@ -20,6 +20,7 @@ This is the contract between a device and the gadget plugin running inside the H
   - Audio payload: mono PCM16, little-endian, at the rate announced by `audio.start`.
   - Image payload: RGB565, little-endian, row-major. Each chunk continues where the previous one stopped.
   - Firmware payload: the next bytes of the image; see [Firmware updates](#firmware-updates).
+  - Face payload: a colour face's RGB565, as for images; see [Faces](#faces).
 
 ## Handshake
 
@@ -57,7 +58,7 @@ Because the id is derived from the key, nobody can claim another device's id wit
    "speaker": {"rate": 16000, "format": "pcm16"},
    "inputs": ["talk", "cancel", "up", "down"],
    "talk_mode": "hold",
-   "profiles": true},
+   "profiles": true, "faces": 1},
  "profile": "ops",
  "actions": [{"name": "led.set", "description": "Set the status LED colour.",
               "params": {"type": "object", "properties": {"color": {"type": "string"}},
@@ -71,6 +72,7 @@ Because the id is derived from the key, nobody can claim another device's id wit
 - `caps.dashboard` (`{"v": 1, "rows": 6}`) means the device draws the [dashboard](#dashboard). `v` is the newest layout it draws, and `rows` is how many lines fit on its screen at once.
 - `actions` is the device's tool manifest. Each action has a JSON-Schema `params` object and a `description` written for the model.
 - `caps.profiles: true` means the device can switch Hermes profiles (see [Profiles](#profiles)). `profile` is the profile it used last; it is omitted for `default`.
+- `caps.faces: 1` means the device draws a face that the server sends for the profile answering it (see [Faces](#faces)). `caps.faces: {"v": 2, "px": 192}` means it also draws colour faces, at `px` pixels square (at most 256): the largest size its Ready screen draws the face at. Where Ready has less room, for example with a second caption line while the device offers profiles, the device scales the face down. `"frames": true` in that object means its colour faces also blink and talk. `face` is the `hash` of the face it holds from an earlier connection; it is omitted when it shows the mascot.
 - `token` is required only when the host sets `GADGET_ACCESS_TOKEN`. A mismatch is rejected with error code `bad_token`.
 - `display_sleeping: true` means the screen is dark as the device connects; it is omitted while the screen is lit. See [Screen sleep](#screen-sleep).
 
@@ -109,6 +111,8 @@ If authentication fails, the server sends `{"type": "error", "code": "auth_faile
 
 `profile` and `profiles` are present only when the device sent `caps.profiles` and the server offers profiles. The Hermes plugin offers the profiles a multiplexed gateway serves that `platforms.gadget.extra.profiles` lists (all of them for `all`), with `default` first; without that setting it offers none. The device keeps the first 8 entries of `profiles` and ignores the rest.
 
+`face` is present only when the device named a face in `hello.face` and may keep it; see [Faces](#faces).
+
 ### Pairing
 
 | Message | Direction | Meaning |
@@ -116,6 +120,7 @@ If authentication fails, the server sends `{"type": "error", "code": "auth_faile
 | `{"type": "pairing", "code": "ABCD2345", "command": "hermes pairing approve gadget ABCD2345"}` | server → device | Show this code; the owner approves it on the Hermes host |
 | `{"type": "paired"}` | server → device | Approved (no reconnect needed) |
 | `{"type": "unpaired"}` | server → device | Approval was revoked |
+| `{"type": "unpaired", "reason": "routed"}` | server → device | Refused, and no pairing code can let it in: a gateway route sends this device, which answers to the default profile, to another profile. The server sends it when the refusal starts, also to a device that is already unpaired, and after `welcome`, in place of a pairing code. The device drops any pairing code it showed and shows why until `paired`, `pairing`, a plain `unpaired` or the next `welcome`; for a reason it doesn't know, it shows the normal pairing screen, but `status` still reports it as `unpaired_reason` |
 
 ### Profiles
 
@@ -128,6 +133,46 @@ A Hermes gateway can serve several profiles (each with its own memory, personali
 | `{"type": "profile", "profile": "default", "error": "busy"}` | server → device | The request was refused; `profile` is unchanged. `error` is `unknown`, `busy` (a turn or question is pending), `unpaired` or `routed` |
 
 A refusal changes nothing on the device. `error` is `routed` when the server's configuration routes this device to a profile; such a device gets no `profiles` in `welcome`. The server may also send `profile` on its own, for example `default` after the device's approval is revoked. A device that does not send `caps.profiles` keeps the gateway's existing routing (normally the default profile).
+
+### Faces
+
+A device that sends `caps.faces` can show each profile with its own face instead of the built-in mascot. A one-colour face is one message:
+
+```json
+{"type": "face", "profile": "ops", "hash": "3f2a91c0d4e5b6a7", "bits": "<base64 26612 bytes>"}
+```
+
+| Field | Meaning |
+|---|---|
+| `profile` | The device's own profile: the last `profile` or `welcome.profile` it got, else the `hello.profile` it sent (`default` without one). The face is that of the profile answering the device, which a gadget route can make another one |
+| `hash` | Names this face. The device sends it back as `hello.face` |
+| `bits` | The face. Without `bits` (and `hash`), the device shows the mascot again |
+
+`bits` holds the three frames (idle, blink, talk) at each of the four sizes (64, 96, 144 and 192 px), smallest size first and idle first within a size: 26,592 bytes in the [layout of the built-in mascot](faces.md#how-it-works). Ten little-endian int16 effect anchors follow, in thousandths of the drawn size: the listening waves' x and y, the speaking waves' x and y, the thinking dots' x and y, the first and last row a blink changes, and the first and last row talking changes. Each anchor is 0 to 1000, and each pair of rows has the first at or above the last. A device ignores a face of any other length, or with an anchor out of range, and shows the mascot.
+
+- The server sends `face` after `welcome`, after each `profile` that is not a refusal, and after `paired` and `unpaired`. An unpaired device gets the mascot: on `unpaired`, or a `welcome` with `paired: false`, the device drops its face, and it ignores `face` until it is paired again.
+- The device keeps its face in memory, through reconnects, while `welcome.face` names it. Before the welcome, the server looks up the `hash` of the face it would send for the profile answering the device, and names the held face only when it has that hash, so an unchanged face stays through reconnects and server restarts and is not sent again. The Hermes plugin names a face file by its bytes and an avatar by its picture's bytes, so the lookup reads one file and converts nothing; one that takes longer than 1.5 s counts as no match. The face itself is made and sent after the welcome. A welcome that does not name the held face, after a new gadget route, a changed face or from a server without faces, makes the device drop it, as does a welcome with `paired: false`.
+- The device also drops its face after a `profile` that names another profile. Either way it shows the mascot until the next `face` arrives, never the previous profile's face. It ignores a `face`, with or without `bits`, whose `profile` is not its own, as the table defines it.
+- The server sends nothing when the device already has the right face: when the welcome named it, or when the device shows the mascot and the profile has no face.
+- A device without `caps.faces` gets no `face` messages. The reference firmware sends `caps.faces` only on boards with PSRAM: a face takes about 27 KB, and its message about 36 KB more while it arrives.
+
+A device that sends `caps.faces: {"v": 2, "px": N}` also takes a still colour face, `N` pixels square, sent like an image:
+
+| Message | Meaning |
+|---|---|
+| `{"type": "face.start", "stream": 9, "profile": "ops", "hash": "11f58ca2bca107e6", "width": 192, "height": 192, "format": "rgb565", "anchors": [620, 300, 500, 620, 820, 110, 370, 430, 521, 719]}` | A colour face begins; its pixels follow on binary channel 4, on `stream`, then `face.end` |
+| `{"type": "face.end", "stream": 9}` | End of the face's pixels |
+
+`profile` and `hash` mean what they mean in `face`. `width` and `height` are the device's `px`. The pixels are `px * px` RGB565 values, little-endian and row-major, in chunks of up to 4096 bytes whose sequence numbers count up from 0. `0x0000` is transparent: the device leaves its background there. `anchors` are the ten effect anchors of a one-colour face, in the same order and range.
+
+A device with `"frames": true` also takes a colour face that blinks and talks. Its `face.start` adds `"blink": [y, rows]`, `"talk": [y, rows]`, or both: the first row and the number of rows that the blink or talk frame changes. After the `px * px` pixels of the idle picture come `rows * px` pixels of the blink band, then those of the talk band, in the same format. A frame draws the idle picture with its band laid over rows `y` to `y + rows - 1`. Each band is two whole numbers with `rows` at least 1 and `y + rows` at most `px`, and the two together have at most `px / 2` rows (rounded down). A frame without a band stays still. The device blinks for 2 of every 45 frames (100 ms each) and, while it speaks, switches between idle and talk every 200 ms, as it does with the mascot.
+
+- A `face.start` makes the device drop the face it holds, as `face` does, and show the mascot until `face.end` brings the whole new face. The device ignores a `face.start` for another profile or while unpaired, as it ignores `face`.
+- The device ignores a `face.start` with another size, another `format`, a `hash` that is empty or longer than 64 characters, anchors that are not ten integers in range, or a band it has no room for or that breaks the rules above, and shows the mascot. It drops a face whose chunks skip a sequence number or bring more than `(px + rows of both bands) * px * 2` bytes, or whose `face.end` comes before them all, or that a reconnect, a profile switch, `unpaired` or another face interrupts.
+- Everything else is as for `face`: the hash, `hello.face` and `welcome.face` keep an unchanged colour face through reconnects, and `face` without `bits` brings the mascot back. A v2 device takes one-colour faces too: a profile's face file is sent as `face`.
+- The reference firmware sets the face's memory aside at start-up, after the framebuffer, on boards with PSRAM, and sends `"v": 2` only when that worked. It asks for room for `px / 2` band rows as well (36 KB at 192 px) and sends `"frames": true` only when it got it; otherwise it sets aside the picture alone. A server that predates colour faces compares `caps.faces` with 1, so it sends such a device no faces at all.
+
+The Hermes plugin sends a profile's `gadget-face.bin`, or else the profile's Hermes avatar made into a still face: in colour where the device draws colour faces, with the avatar's blink and talk pictures where it takes frames. See [Faces](faces.md#a-face-for-each-hermes-profile).
 
 ## Conversation
 
@@ -189,13 +234,13 @@ The server fits images inside `caps.display.image` before sending them, so devic
 
 ### Screen sleep
 
-A device whose screen goes dark (a timeout, or the power key) tells the server, and the server holds back screen updates until the screen lights up again. This saves the radio time and the screen wake-ups that cards and images would otherwise cost while nobody is looking.
+A device whose screen goes dark (a timeout, the power key, or lying face down) tells the server, and the server holds back screen updates until the screen lights up again. This saves the radio time and the screen wake-ups that cards and images would otherwise cost while nobody is looking.
 
 - The device sends `{"type": "state", "display_sleeping": true}` when the screen goes dark and `{"type": "state", "display_sleeping": false}` when it lights up. Only changes are sent, as they happen, without the rate limit sensor readings have. A device that connects in the dark says so in `hello` instead.
 - While the screen is dark the server keeps the latest `display` card or image (a newer one replaces an older one, as it would on screen), the latest `status` phrase and the latest `dashboard`, and sends none of them.
-- When the screen lights up, the server sends the held `status` phrase, then the held `dashboard`, then the held card or image. A card or image with a `ttl_s` keeps only the time it has left, counted from when it was sent, and one whose time ran out is dropped. A held status phrase is dropped when its turn ends.
+- When the screen lights up, the server sends the held `status` phrase, then the held `dashboard`, then the held card or image. A card or image with a `ttl_s` keeps only the time it has left, counted from when it was sent, and one whose time ran out is dropped. A held status phrase is dropped when its turn ends. A held dashboard is dropped when a newer one goes out first, and is not sent to a device that is unpaired or that reconnects without `caps.dashboard`.
 - What is held survives a reconnect: it goes out once the device connects with its screen lit.
-- Everything else is sent at once: `prompt` and `prompt.close`, `pairing`, turns, transcripts, replies, audio, `notice`, actions and firmware updates. A question or a reply still lights the screen.
+- Everything else is sent at once: `prompt` and `prompt.close`, `pairing`, turns, transcripts, replies, audio, `notice`, actions and firmware updates. A question or a reply still lights the screen, except while the device lies face down: then it waits for the device to be turned over.
 - A device that never sends `display_sleeping` counts as lit, so nothing is held back for it.
 
 ### Dashboard

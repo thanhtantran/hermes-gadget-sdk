@@ -137,6 +137,23 @@ void Canvas::blit(int x, int y, int w, int h, const uint16_t* src) {
   }
 }
 
+void Canvas::picture(int x, int y, int size, const uint16_t* src, int src_px, const uint16_t* band, int band_y,
+                     int band_rows) {
+  for (int row = 0; row < size; ++row) {
+    int yy = y + row;
+    if (yy < clip_y0_ || yy >= clip_y1_ || yy >= h_ || yy < 0) continue;
+    if (yy < base_y_ || yy >= base_y_ + rows_) continue;
+    const int src_row = row * src_px / size, in_band = src_row - band_y;
+    const uint16_t* line = in_band >= 0 && in_band < band_rows ? band + in_band * src_px : src + src_row * src_px;
+    for (int col = 0; col < size; ++col) {
+      int xx = x + col;
+      uint16_t c = line[col * src_px / size];
+      if (xx < 0 || xx >= w_ || !c) continue;
+      px_[(yy - base_y_) * stride_ + xx] = encode(c);
+    }
+  }
+}
+
 // Widths are in code points (font::length): a UTF-8 letter is one column.
 std::vector<std::string> wrap_text(std::string_view text, int max_chars) {
   std::vector<std::string> lines;

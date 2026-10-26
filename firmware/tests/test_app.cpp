@@ -1,5 +1,6 @@
 // Drives hg::App through a fake HAL the way a Hermes gateway would.
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <string>
@@ -21,6 +22,13 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   // System
   uint32_t clock = 1000;
   uint32_t now_ms() override { return clock; }
+  hg::WallTime wall;  // what wall_time() reports once wall_ok holds
+  bool wall_ok = false;
+  bool wall_time(hg::WallTime& out) override {
+    if (!wall_ok) return false;
+    out = wall;
+    return true;
+  }
   bool dozing = false;
   int doze_changes = 0;
   void set_dozing(bool d) override {
@@ -143,7 +151,11 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   bool spk_draining = false;  // ended, but the last audio is still playing
   size_t spk_samples = 0;
   bool begin(uint32_t) override { return spk_open = true; }
-  void write(const int16_t*, size_t n) override { spk_samples += n; }
+  bool spoke_while_dozing = false;  // the speaker was written before the port woke
+  void write(const int16_t*, size_t n) override {
+    spk_samples += n;
+    if (dozing) spoke_while_dozing = true;
+  }
   void end() override { spk_open = false; }
   void abort() override { spk_open = false; }
   bool busy() const override { return spk_open || spk_draining; }
@@ -203,6 +215,13 @@ struct Rig {
   explicit Rig(const std::string& server = "ws://hermes.local:8765/gadget") : app(hal, profile(server)) {}
   explicit Rig(hg::DeviceProfile p) : app(hal, std::move(p)) {}
 
+  // A board whose port feeds App::on_motion: it can sleep face down.
+  static hg::DeviceProfile motion_profile() {
+    hg::DeviceProfile p = profile("ws://hermes.local:8765/gadget");
+    p.motion_sensor = true;
+    return p;
+  }
+
   static hg::DeviceProfile touch_profile() {
     hg::DeviceProfile p = profile("ws://hermes.local:8765/gadget");
     p.touch_screen = true;
@@ -223,6 +242,14 @@ struct Rig {
     for (uint32_t t = 0; t < ms; t += 10) {
       fake.clock += 10;
       app.tick();
+    }
+  }
+
+  // Feeds on_motion at 10 Hz while the clock runs, like the port's motion task.
+  void hold_still(int16_t x, int16_t y, int16_t z, uint32_t ms) {
+    for (uint32_t t = 0; t < ms; t += 100) {
+      app.on_motion(x, y, z);
+      advance(100);
     }
   }
 
@@ -322,6 +349,50 @@ TEST("app: unpaired devices show the pairing code until approved") {
   CHECK(!r.fake.mic_on);
   r.server(R"({"type":"paired"})");
   CHECK(r.app.screen() == hg::Screen::Ready);
+}
+
+TEST("app: a device a route refuses says so until a new connection or approval") {
+  const std::string asking = "Asking Hermes for a pairing code...";
+  Rig r;
+  r.bring_online(true);
+  r.server(R"({"type":"unpaired","reason":"routed"})");
+  CHECK(r.app.screen() == hg::Screen::Pairing);
+  CHECK_EQ(r.app.model().headline, std::string("Refused by a route"));
+  CHECK_EQ(r.app.model().detail, std::string("Remove its route on the Hermes host."));
+  CHECK_EQ(r.app.model().hint, r.app.device_id());
+  CHECK(r.app.console("status").find(R"("unpaired_reason":"routed")") != std::string::npos);
+  r.server(R"({"type":"paired"})");
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.console("status").find("unpaired_reason") == std::string::npos);
+  r.server(R"({"type":"unpaired"})");  // revoked: a code can fix that
+  CHECK_EQ(r.app.model().detail, asking);
+  CHECK(r.app.model().hint != r.app.device_id());
+  r.server(R"({"type":"unpaired","reason":"a-later-reason"})");  // one this firmware doesn't know
+  CHECK_EQ(r.app.model().detail, asking);
+
+  r.server(R"({"type":"unpaired","reason":"routed"})");
+  r.app.on_transport_closed("server restarted");
+  r.advance(1500);
+  r.app.on_transport_open();
+  r.server(R"({"type":"challenge","nonce":"bm9uY2U=","enrolled":true})");
+  r.server(R"({"type":"welcome","session":"s2","heartbeat_s":20,"paired":false})");
+  CHECK_EQ(r.app.model().detail, asking);  // the new connection says again, or not
+}
+
+TEST("app: a refusal for a route drops a pairing code shown before") {
+  Rig r;
+  r.bring_online(false);
+  r.server(R"({"type":"pairing","code":"ABCD2345","command":"hermes pairing approve gadget ABCD2345"})");
+  r.app.on_transport_closed("route configured");
+  r.advance(3000);
+  r.app.on_transport_open();
+  r.server(R"({"type":"challenge","nonce":"bm9uY2U=","enrolled":true})");
+  r.server(R"({"type":"welcome","session":"s2","heartbeat_s":20,"paired":false})");
+  CHECK_EQ(r.app.model().code, std::string("ABCD2345"));  // revoked, not refused: the code still works
+  r.server(R"({"type":"unpaired","reason":"routed"})");
+  CHECK_EQ(r.app.model().headline, std::string("Refused by a route"));
+  CHECK(r.app.model().code.empty());
+  CHECK(r.app.console("status").find("pairing_code") == std::string::npos);
 }
 
 TEST("app: push-to-talk streams audio and shows the reply") {
@@ -889,11 +960,202 @@ TEST("app: the mascot fills idle, listening and thinking screens") {
   r.advance(500);
   r.app.on_button(hg::Button::Talk, false);
   CHECK(r.app.screen() == hg::Screen::Thinking && r.app.model().hero);
-  // Audio before text: the mascot speaks; text arrives: the reply takes the screen.
   r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
   CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);
-  r.server(R"({"type":"reply","text":"Done."})");
+}
+
+namespace {
+
+constexpr const char* kLongReply =
+    "The forecast for today is sunny with a light breeze, and tomorrow brings rain in the afternoon.";
+
+// The caption under the talking face: two lines, the reply's latest, in order.
+void check_latest_lines(const hg::UiModel& m, const std::string& reply) {
+  CHECK(m.hero);
+  CHECK_EQ(int(m.caption_lines), 2);
+  const size_t nl = m.detail.find('\n');
+  CHECK(nl != std::string::npos);
+  if (nl == std::string::npos) return;
+  const std::string first = m.detail.substr(0, nl), second = m.detail.substr(nl + 1);
+  CHECK(!first.empty() && !second.empty());
+  const std::string tail = first + " " + second;
+  CHECK(reply.size() > tail.size());  // not the whole reply
+  if (reply.size() > tail.size()) CHECK_EQ(reply.substr(reply.size() - tail.size()), tail);
+}
+
+std::string reply_msg(const char* type, const char* turn, const char* text) {
+  return std::string(R"({"type":")") + type + R"(","turn":")" + turn + R"(","text":")" + text + "\"}";
+}
+
+}  // namespace
+
+TEST("app: text, then speech: the face talks over the reply's latest lines, and the text shows when it ends") {
+  Rig r;
+  r.bring_online(true);
+  r.server(R"({"type":"turn.start","turn":"t"})");
+  r.server(reply_msg("reply.delta", "t", "It is"));
+  CHECK(r.app.screen() == hg::Screen::Responding && !r.app.model().hero);  // no speech yet: the text
+  r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+  CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero && r.app.model().speaking);
+  CHECK_EQ(r.app.model().detail, std::string("It is"));
+  CHECK_EQ(int(r.app.model().caption_lines), 2);
+  r.server(reply_msg("reply", "t", kLongReply));
+  check_latest_lines(r.app.model(), kLongReply);
+  r.server(R"({"type":"audio.end","stream":2})");
+  r.advance(100);
+  CHECK(r.app.screen() == hg::Screen::Responding && !r.app.model().hero);
+  CHECK_EQ(r.app.model().body, std::string(kLongReply));
+  r.server(R"({"type":"turn.end","turn":"t","outcome":"success"})");
+  r.advance(200);
+  CHECK(r.app.screen() == hg::Screen::Ready && !r.app.model().hero);
+  CHECK_EQ(r.app.model().body, std::string(kLongReply));
+}
+
+TEST("app: speech, then text: the face talks from the start, and the text shows when the speech ends") {
+  Rig r;
+  r.bring_online(true);
+  r.server(R"({"type":"turn.start","turn":"t"})");
+  r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+  CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);
+  r.server(reply_msg("reply.delta", "t", kLongReply));
+  check_latest_lines(r.app.model(), kLongReply);
+  r.server(reply_msg("reply", "t", kLongReply));
+  r.server(R"({"type":"turn.end","turn":"t","outcome":"success"})");
+  r.advance(200);
+  check_latest_lines(r.app.model(), kLongReply);  // the turn is over, the speech is not
+  r.server(R"({"type":"audio.end","stream":2})");
+  r.advance(200);
+  CHECK(r.app.screen() == hg::Screen::Ready && !r.app.model().hero);
+  CHECK_EQ(r.app.model().body, std::string(kLongReply));
+}
+
+TEST("app: a reply with no speech is text from its first words") {
+  Rig r;
+  r.bring_online(true);
+  r.server(R"({"type":"turn.start","turn":"t"})");
+  r.server(reply_msg("reply.delta", "t", "It is"));
+  CHECK(r.app.screen() == hg::Screen::Responding && !r.app.model().hero);
+  r.server(reply_msg("reply", "t", kLongReply));
   CHECK(!r.app.model().hero);
+  CHECK_EQ(r.app.model().body, std::string(kLongReply));
+}
+
+TEST("app: a tap or a scroll during speech shows the whole text, and the speech goes on") {
+  Rig r(Rig::touch_profile());
+  r.bring_online(true);
+  hg::TouchGestures touch(r.app);
+  r.server(R"({"type":"turn.start","turn":"t"})");
+  r.server(reply_msg("reply", "t", kLongReply));
+  r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+  check_latest_lines(r.app.model(), kLongReply);
+  touch.update(true, 160, 120, r.fake.clock);
+  touch.update(false, 0, 0, r.fake.clock + 30);
+  CHECK(r.app.screen() == hg::Screen::Responding && !r.app.model().hero);
+  CHECK_EQ(r.app.model().body, std::string(kLongReply));
+  CHECK(r.fake.spk_open && !r.fake.mic_on);
+  CHECK(r.fake.last("audio.start") == nullptr);  // the tap recorded nothing
+  // The next spoken reply has its caption again.
+  r.server(R"({"type":"audio.end","stream":2})");
+  r.server(R"({"type":"turn.end","turn":"t","outcome":"success"})");
+  r.advance(200);
+  r.server(R"({"type":"turn.start","turn":"t2"})");
+  r.server(reply_msg("reply", "t2", kLongReply));
+  r.server(R"({"type":"audio.start","stream":3,"rate":16000,"format":"pcm16"})");
+  check_latest_lines(r.app.model(), kLongReply);
+
+  // On a board with buttons, UP or DOWN shows the text from where it is, without scrolling it yet.
+  Rig b;
+  b.bring_online(true);
+  b.server(reply_msg("reply", "", kLongReply));
+  b.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+  check_latest_lines(b.app.model(), kLongReply);
+  const int scroll = b.app.model().scroll;
+  b.app.on_button(hg::Button::Down, true);
+  b.app.on_button(hg::Button::Down, false);
+  CHECK(!b.app.model().hero);
+  CHECK_EQ(b.app.model().scroll, scroll);
+  CHECK(b.fake.spk_open);
+}
+
+TEST("app: a question or a short card over a reply keeps its tap") {
+  auto tap = [](Rig& r, hg::TouchGestures& touch) {
+    touch.update(true, 160, 120, r.fake.clock);
+    r.advance(30);
+    touch.update(false, 0, 0, r.fake.clock);
+  };
+  // A question that arrives during the speech: the tap answers yes.
+  {
+    Rig r(Rig::touch_profile());
+    r.bring_online(true);
+    hg::TouchGestures touch(r.app);
+    r.server(R"({"type":"turn.start","turn":"t"})");
+    r.server(reply_msg("reply", "t", kLongReply));
+    r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+    r.server(R"({"type":"prompt","id":"q","title":"Allow?","text":"Continue?"})");
+    r.advance(700);
+    CHECK(r.app.screen() == hg::Screen::Prompt);
+    tap(r, touch);
+    CHECK(r.fake.last("prompt.reply") != nullptr);
+  }
+  // A short card during the speech: the tap closes it and stops the speech, as before.
+  {
+    Rig r(Rig::touch_profile());
+    r.bring_online(true);
+    hg::TouchGestures touch(r.app);
+    r.server(R"({"type":"turn.start","turn":"t"})");
+    r.server(reply_msg("reply", "t", kLongReply));
+    r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+    r.server(R"({"type":"display","title":"Card","body":"Remember milk.","ttl_s":0})");
+    CHECK(r.app.screen() == hg::Screen::Card && r.app.model().hero);
+    tap(r, touch);
+    CHECK(r.app.screen() != hg::Screen::Card);
+    CHECK(!r.fake.spk_open);
+  }
+  // A question over a silent reply on a panel with no caption: the tap answers it.
+  {
+    Rig r(Rig::touch_profile());
+    r.fake.make_panel(240, 135);
+    r.bring_online(true);
+    hg::TouchGestures touch(r.app);
+    r.server(reply_msg("reply.delta", "t", "Silent text."));
+    r.server(R"({"type":"prompt","id":"q","title":"Allow?","text":"Continue?"})");
+    r.advance(700);
+    tap(r, touch);
+    CHECK(r.fake.last("prompt.reply") != nullptr);
+  }
+}
+
+TEST("app: a long reply spoken under the caption gives its first page the whole reading time after the speech") {
+  Rig r;
+  r.bring_online(true);
+  std::string text;
+  for (int i = 0; i < 40; ++i) text += "sentence " + std::to_string(i) + " of a long answer. ";
+  r.server(R"({"type":"turn.start","turn":"t"})");
+  r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+  r.server(reply_msg("reply", "t", text.c_str()));
+  r.server(R"({"type":"turn.end","turn":"t","outcome":"success"})");
+  r.advance(7000);  // past the first page's reading time, partway into a second one
+  CHECK(r.app.model().hero);
+  r.server(R"({"type":"audio.end","stream":2})");
+  r.advance(100);
+  CHECK(!r.app.model().hero);
+  CHECK_EQ(r.app.model().scroll, 0);
+  r.advance(7000);
+  CHECK_EQ(r.app.model().scroll, 0);  // the first page gets its reading time
+  r.advance(1500);
+  CHECK(r.app.model().scroll > 0);
+}
+
+TEST("app: where the face and two caption lines don't fit, a spoken reply shows its text as before") {
+  Rig r;
+  r.fake.make_panel(240, 135);
+  r.bring_online(true);
+  r.server(R"({"type":"turn.start","turn":"t"})");
+  r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
+  CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);  // no text yet: the face
+  r.server(reply_msg("reply", "t", kLongReply));
+  CHECK(r.app.model().speaking && !r.app.model().hero);
+  CHECK_EQ(r.app.model().body, std::string(kLongReply));
 }
 
 TEST("app: a finished reply stays readable, then the mascot returns; UP brings it back") {
@@ -1708,6 +1970,271 @@ TEST("doze: boards without a power reading never doze") {
   CHECK(!r.fake.dozing);
 }
 
+namespace {
+// The last state message about the screen (sensor readings also travel as state).
+const Value* last_display_state(const FakeHal& fake) {
+  for (auto it = fake.sent.rbegin(); it != fake.sent.rend(); ++it)
+    if ((*it)["type"].as_string() == "state" && (*it)["display_sleeping"].is_bool()) return &*it;
+  return nullptr;
+}
+}  // namespace
+
+TEST("face down: off by default; a motion board lying face down stays lit") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  r.hold_still(30, -20, -1000, 2000);
+  CHECK_EQ(r.fake.brightness, 100);
+  Value status;
+  CHECK(hg::json::parse(r.app.status_json(), status));
+  CHECK(status["face_down"].is_bool() && !status["face_down"].as_bool());
+}
+
+TEST("face down: set face_down_sleep takes on or off only, and the choice survives a restart") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set face_down_sleep maybe"), std::string("@error face_down_sleep must be on or off"));
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  Rig again(Rig::motion_profile());
+  again.fake.backlight = true;
+  again.fake.kv = r.fake.kv;
+  again.bring_online(true);
+  again.hold_still(0, 0, -1000, 1000);
+  CHECK_EQ(again.fake.brightness, 0);  // on out of the box, no command needed
+}
+
+TEST("face down: the screen goes dark, listening is cancelled and Hermes is told; turned over it lights") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  r.app.on_button(hg::Button::Talk, true);
+  CHECK(r.fake.mic_on);
+  r.hold_still(30, -20, -1000, 1000);
+  CHECK_EQ(r.fake.brightness, 0);
+  CHECK(!r.fake.mic_on);
+  CHECK(r.fake.last("audio.cancel") != nullptr);
+  Value status;
+  CHECK(hg::json::parse(r.app.status_json(), status));
+  CHECK(status["face_down"].as_bool());
+  const Value* dark = last_display_state(r.fake);
+  CHECK(dark && (*dark)["display_sleeping"].as_bool());
+  r.app.on_button(hg::Button::Talk, false);  // the release is swallowed, as on a timed-out screen
+  CHECK_EQ(r.fake.brightness, 0);
+  r.hold_still(0, 0, 1000, 500);
+  CHECK_EQ(r.fake.brightness, 100);
+  const Value* lit = last_display_state(r.fake);
+  CHECK(lit && (*lit)["display_sleeping"].is_bool() && !(*lit)["display_sleeping"].as_bool());
+}
+
+TEST("face down: a reply being spoken goes quiet, the turn goes on, and its text waits for the turn-over") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  r.server(R"({"type":"turn.start","turn":"t1"})");
+  r.server(R"({"type":"audio.start","stream":3,"rate":16000,"format":"pcm16"})");
+  r.server(R"({"type":"reply","text":"Your package arrived."})");
+  CHECK(r.fake.spk_open);
+  r.hold_still(30, -20, -1000, 1000);
+  CHECK(!r.fake.spk_open);
+  CHECK(r.fake.last("cancel") == nullptr);  // Hermes keeps working
+  CHECK_EQ(r.fake.brightness, 0);
+  r.server(R"({"type":"audio.end","stream":3})");
+  r.server(R"({"type":"turn.end","turn":"t1","outcome":"success"})");
+  // Longer than a reply normally stays up: the text still waits for the turn-over.
+  r.hold_still(0, 0, -1000, 30000);
+  r.hold_still(0, 0, 1000, 500);
+  CHECK_EQ(r.fake.brightness, 100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(!r.app.model().hero);  // the reply's text, not the mascot
+  CHECK_EQ(r.app.model().body, std::string("Your package arrived."));
+}
+
+TEST("face down: speech that arrives face down plays nothing, and its text waits for the turn-over") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  // A new turn starts while the last one's speech still plays: the mode is Thinking.
+  r.server(R"({"type":"turn.start","turn":"t1"})");
+  r.server(R"({"type":"audio.start","stream":3,"rate":16000,"format":"pcm16"})");
+  r.server(R"({"type":"turn.start","turn":"t2"})");
+  CHECK(r.fake.spk_open);
+  r.hold_still(30, -20, -1000, 1000);
+  CHECK(!r.fake.spk_open);  // the left-over speech stops too
+  CHECK_EQ(r.fake.brightness, 0);
+  // The thinking turn answers while the gadget lies there: silent, and the text waits.
+  r.server(R"({"type":"audio.start","stream":4,"rate":16000,"format":"pcm16"})");
+  CHECK(!r.fake.spk_open);  // the stream is never begun
+  r.server(R"({"type":"reply","text":"Your package arrived."})");
+  r.server(R"({"type":"turn.end","turn":"t2","outcome":"success"})");
+  r.app.on_button(hg::Button::Talk, true);
+  r.app.on_button(hg::Button::Talk, false);
+  CHECK(!r.fake.mic_on);
+  CHECK_EQ(r.fake.brightness, 0);
+  // Longer than a reply normally stays up: the text still waits for the turn-over.
+  r.hold_still(0, 0, -1000, 30000);
+  r.hold_still(0, 0, 1000, 500);
+  CHECK_EQ(r.fake.brightness, 100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(!r.app.model().hero);  // the reply's text, not the mascot
+  CHECK_EQ(r.app.model().body, std::string("Your package arrived."));
+  CHECK_EQ(r.app.model().scroll, 0);  // from the top
+}
+
+TEST("face down: nothing lights the screen - a press, a question, brightness and volume changes") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  r.hold_still(0, 0, -1000, 1000);
+  CHECK_EQ(r.fake.brightness, 0);
+  r.app.on_button(hg::Button::Talk, true);
+  r.app.on_button(hg::Button::Talk, false);
+  CHECK(!r.fake.mic_on);  // the press is consumed, no recording starts
+  r.server(R"({"type":"prompt","id":"q1","title":"Allow?","text":"Run the command"})");
+  CHECK_EQ(r.fake.brightness, 0);
+  r.server(R"({"type":"action","id":"b1","name":"screen.brightness","args":{"percent":60}})");
+  CHECK_EQ(r.fake.brightness, 0);  // the level is stored, not applied
+  CHECK_EQ(r.app.console("set volume 40"), std::string("@ok volume"));
+  CHECK_EQ(r.fake.brightness, 0);
+  r.hold_still(0, 0, -1000, 200);
+  const Value* dark = last_display_state(r.fake);
+  CHECK(dark && (*dark)["display_sleeping"].as_bool());  // Hermes still holds cards for it
+  r.hold_still(0, 0, 1000, 500);
+  CHECK_EQ(r.fake.brightness, 60);  // the turn-over applies the stored level
+}
+
+TEST("face down: a ringing alarm goes quiet; a timer that ends face down rings with a dark screen") {
+  {
+    KeyPower key;
+    Rig r(Rig::motion_profile());
+    r.fake.backlight = true;
+    r.hal.power = &key;
+    r.bring_online(true);
+    CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+    r.server(R"({"type":"action","id":"x1","name":"timer.start","args":{"seconds":1}})");
+    r.hold_still(0, 0, 1000, 1500);  // face up while it starts to ring
+    CHECK(r.app.screen() == hg::Screen::Alarm);
+    const size_t beeps = r.fake.spk_samples;
+    CHECK(beeps > 0);
+    r.hold_still(0, 0, -1000, 1000);  // face down: quiet, and the alarm stays up
+    CHECK_EQ(r.fake.brightness, 0);
+    CHECK(r.app.screen() == hg::Screen::Alarm);
+    const size_t quiet = r.fake.spk_samples;
+    r.hold_still(0, 0, -1000, 3000);
+    CHECK_EQ(r.fake.spk_samples, quiet);
+    r.hold_still(0, 0, 1000, 500);  // turned over: the alarm shows
+    CHECK_EQ(r.fake.brightness, 100);
+    CHECK(r.app.screen() == hg::Screen::Alarm);
+    r.hold_still(0, 0, 1000, 3000);  // and stays quiet: laying it face down was the hush
+    CHECK_EQ(r.fake.spk_samples, quiet);
+  }
+  {
+    // On battery, a face-down idle board dozes; the alarm's beeps are never written while dozing.
+    KeyPower key;
+    Rig r(Rig::motion_profile());
+    r.fake.backlight = true;
+    r.hal.power = &key;
+    r.bring_online(true);
+    CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+    r.hold_still(0, 0, -1000, 1000);
+    CHECK_EQ(r.fake.brightness, 0);
+    CHECK(r.fake.dozing);
+    r.server(R"({"type":"action","id":"x1","name":"timer.start","args":{"seconds":1}})");
+    const size_t before = r.fake.spk_samples;
+    r.hold_still(0, 0, -1000, 1600);  // the timer ends face down
+    CHECK(r.fake.spk_samples > before);  // an alarm should be heard: it rings
+    CHECK_EQ(r.fake.brightness, 0);       // with the screen dark
+    CHECK(!r.fake.spoke_while_dozing);
+  }
+}
+
+TEST("face down: a sensor that stops reporting for two seconds lights the screen") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  r.hold_still(0, 0, -1000, 1000);
+  CHECK_EQ(r.fake.brightness, 0);
+  r.advance(2100);  // no sample arrives
+  CHECK_EQ(r.fake.brightness, 100);  // never stay dark on old data
+}
+
+TEST("face down: turning the setting off while face down lights the screen on the next tick") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  r.hold_still(0, 0, -1000, 1000);
+  CHECK_EQ(r.fake.brightness, 0);
+  CHECK_EQ(r.app.console("set face_down_sleep off"), std::string("@ok face_down_sleep"));
+  CHECK_EQ(r.fake.brightness, 0);  // the console itself lights nothing
+  r.advance(50);
+  CHECK_EQ(r.fake.brightness, 100);
+}
+
+TEST("face down: boards without a motion sensor or without a backlight never offer it") {
+  const auto never_offered = [](Rig& r) {
+    // A full lap of the menu never lands on the item.
+    CHECK(r.app.open_settings());
+    for (int i = 0; i < 20; ++i) {
+      r.app.on_button(hg::Button::Down, true);
+      CHECK(r.app.model().detail != std::string("Face-down sleep"));
+    }
+    r.app.close_settings();
+  };
+  {
+    Rig plain;  // no motion sensor: the setting is stored and does nothing
+    plain.fake.backlight = true;
+    plain.bring_online(true);
+    CHECK_EQ(plain.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+    plain.hold_still(0, 0, -1000, 2000);
+    CHECK_EQ(plain.fake.brightness, 100);
+    Value status;
+    CHECK(hg::json::parse(plain.app.status_json(), status));
+    CHECK(!status["face_down"].is_bool());
+    never_offered(plain);
+  }
+  {
+    Rig r(Rig::motion_profile());  // a motion sensor, but no backlight to turn off
+    r.bring_online(true);
+    CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+    r.hold_still(0, 0, -1000, 2000);
+    // Its picture stays lit, so Hermes is never told that the screen is dark.
+    const Value* dark = last_display_state(r.fake);
+    CHECK(!dark || !(*dark)["display_sleeping"].as_bool());
+    Value status;
+    CHECK(hg::json::parse(r.app.status_json(), status));
+    CHECK(!status["face_down"].is_bool());
+    CHECK(!status["display_sleeping"].as_bool());
+    never_offered(r);
+  }
+}
+
+TEST("face down: the settings item follows Screen timeout, shows Off and toggles") {
+  Rig r(Rig::motion_profile());
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 20 && r.app.model().detail != "Screen timeout"; ++i) r.app.on_button(hg::Button::Down, true);
+  CHECK_EQ(r.app.model().detail, std::string("Screen timeout"));
+  r.app.on_button(hg::Button::Down, true);
+  CHECK_EQ(r.app.model().detail, std::string("Face-down sleep"));  // next after Screen timeout
+  CHECK(r.app.model().body.rfind("Off\n", 0) == 0);
+  r.app.on_button(hg::Button::Talk, true);
+  r.app.on_button(hg::Button::Talk, false);
+  CHECK(r.app.model().body.rfind("On\n", 0) == 0);
+  r.app.on_button(hg::Button::Talk, true);
+  r.app.on_button(hg::Button::Talk, false);
+  CHECK(r.app.model().body.rfind("Off\n", 0) == 0);
+  r.app.close_settings();
+  r.hold_still(0, 0, -1000, 1000);  // back on Off: lying face down does nothing
+  CHECK_EQ(r.fake.brightness, 100);
+}
+
 TEST("power: an idle settings menu sleeps on every view; the wake input restores it where it was") {
   Rig r;
   r.fake.backlight = true;
@@ -1778,7 +2305,7 @@ TEST("power: failed readings replace stale data and shutdown requires a second l
   CHECK(status["power"]["battery_mv"].is_null());
   CHECK((*r.fake.last("state"))["sensors"]["battery_mv"].is_null());
   r.app.open_settings();
-  for (int i = 0; i < 10; ++i) r.app.console("cancel");
+  for (int i = 0; i < 11; ++i) r.app.console("cancel");  // the Clock face item sits before Power off
   CHECK_EQ(r.app.model().detail, std::string("Power off"));
   r.app.console("talk"); r.app.console("release");
   CHECK_EQ(battery.shutdowns, 0);
@@ -2537,6 +3064,33 @@ static void same_screens_banded(int width, int height, bool round, int band_rows
     r.advance(300);
   }, "the alarm dismissed");
   CHECK(banded.app.screen() != hg::Screen::Alarm);
+  both([](Rig& r) {
+    r.fake.wall = hg::WallTime{2026, 10, 24, 6, 9, 41, 0};
+    r.fake.wall_ok = true;
+    r.app.console("set clock 5");
+    r.advance(40000);  // the reply's linger runs out, then the 5 s rest
+  }, "the clock");
+  CHECK(banded.app.screen() == hg::Screen::Clock);
+  both([](Rig& r) {
+    r.server(R"({"type":"action","id":"t2","name":"timer.start","args":{"seconds":1}})");
+    r.advance(1200);  // the timer takes the screen back from the clock
+  }, "the timer over the clock");
+  CHECK(banded.app.screen() != hg::Screen::Clock);
+  both([](Rig& r) { r.advance(400); }, "the alarm over the clock");
+  CHECK(banded.app.screen() == hg::Screen::Alarm);
+  both([](Rig& r) {
+    r.app.on_button(hg::Button::Talk, true);
+    r.app.on_button(hg::Button::Talk, false);
+    r.advance(300);
+  }, "the alarm dismissed again");
+  CHECK(banded.app.screen() != hg::Screen::Alarm);
+  both([](Rig& r) { r.advance(6000); }, "the clock again");
+  CHECK(banded.app.screen() == hg::Screen::Clock);  // the same minute: the face must repaint
+  both([](Rig& r) {
+    r.server(R"({"type":"notice","text":"Back soon","ttl_s":30})");
+    r.advance(300);
+  }, "the clock leaving");
+  CHECK(banded.app.screen() != hg::Screen::Clock);
   both([](Rig& r) { wifi_setup_with_code(r); r.advance(300); }, "Wi-Fi setup");
   CHECK(banded.app.screen() == hg::Screen::Setup);
   CHECK_EQ(full.fake.stray_flushes, 0);
@@ -3067,7 +3621,7 @@ TEST("language: English by default, and set language switches the device's own t
   CHECK_EQ(r.fake.kv["language"], std::string("es"));
   CHECK(r.app.model().lang == hg::i18n::Lang::Es);
   CHECK_EQ(r.app.model().headline, std::string("Hola, soy Hermes"));
-  CHECK_EQ(r.app.model().detail, std::string("Pregúntame lo que sea"));  // drawn with its accent (Latin-1 font)
+  CHECK_EQ(r.app.model().detail, std::string("Pregúntame algo"));  // drawn with its accent (Latin-1 font)
   CHECK_EQ(r.app.model().hint, std::string("mantén TALK y habla"));
   CHECK_EQ(r.app.console("get language"), std::string(R"(@value {"key":"language","value":"es"})"));
   // An empty value goes back to English.
@@ -3161,7 +3715,7 @@ TEST("language: a touch board's control phrase is translated with the rest") {
   CHECK(r.app.screen() == hg::Screen::Listening);
   CHECK_EQ(r.app.model().headline, std::string("Escuchando"));
   CHECK_EQ(r.app.model().detail, std::string("Suelta para enviar"));
-  CHECK_EQ(r.app.model().hint, std::string("Desliza abajo: descartar"));
+  CHECK_EQ(r.app.model().hint, std::string("Desliza: descartar"));
 }
 
 TEST("language: the dashboard's headings and states are translated") {
@@ -3665,4 +4219,1025 @@ TEST("language: the agent can set auto through screen.language") {
   CHECK(res && (*res)["ok"].as_bool() && (*res)["result"]["language"].as_string() == "auto");
   CHECK_EQ(r.fake.kv["language"], std::string("auto"));
   CHECK(r.app.model().lang == hg::i18n::Lang::Es);
+}
+
+namespace {
+// A face message (docs/protocol.md#faces) whose every bitmap byte is `ink`.
+std::string face_message(const std::string& profile, const std::string& hash, uint8_t ink = 0xff,
+                         std::vector<int> anchors = {607, 293, 262, 620, 801, 107, 396, 508, 586, 649}) {
+  std::vector<uint8_t> data(3 * (512 + 1152 + 2592 + 4608), ink);
+  for (int v : anchors) {
+    data.push_back(static_cast<uint8_t>(v & 0xff));
+    data.push_back(static_cast<uint8_t>(v >> 8));
+  }
+  return R"({"type":"face","profile":")" + profile + R"(","hash":")" + hash + R"(","bits":")" +
+         hg::crypto::base64_encode(data.data(), data.size()) + R"("})";
+}
+size_t pixels_changed(const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
+  size_t n = 0;
+  for (size_t i = 0; i < a.size(); ++i) n += a[i] != b[i];
+  return n;
+}
+// Saturday, 24 October 2026 at 09:41 — the wall time behind the clock tests.
+const hg::WallTime kWallSaturday{2026, 10, 24, 6, 9, 41, 0};
+// Sunday, 25 October 2026 at 00:05 — midnight in both time formats.
+const hg::WallTime kWallMidnight{2026, 10, 25, 0, 0, 5, 0};
+}  // namespace
+
+TEST("faces: a face replaces the mascot until a face without bits brings it back") {
+  Rig r;
+  r.bring_online(true);
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello && (*hello)["caps"]["faces"].as_int() == 1);
+  r.advance(100);
+  const std::vector<uint16_t> mascot = r.fake.fb;
+  r.server(face_message("default", "a1"));
+  r.advance(100);
+  CHECK(r.app.model().face && r.app.model().face->hash == "a1");
+  CHECK(pixels_changed(mascot, r.fake.fb) > 5000);  // a solid square where the mascot was
+  r.server(R"({"type":"face","profile":"default"})");
+  r.advance(100);
+  CHECK(r.app.model().face == nullptr);
+  CHECK(pixels_changed(mascot, r.fake.fb) < 300);  // at most a blink apart
+}
+
+TEST("faces: a malformed face shows the mascot") {
+  Rig r;
+  r.bring_online(true);
+  r.server(face_message("default", "a1"));
+  r.server(R"({"type":"face","profile":"default","hash":"b2","bits":"AAAA"})");
+  CHECK(r.app.model().face == nullptr);
+  r.server(face_message("default", ""));
+  CHECK(r.app.model().face == nullptr);
+  r.server(R"({"type":"face","profile":"default","hash":"c3","bits":")" + std::string(400000, 'A') + R"("})");
+  CHECK(r.app.model().face == nullptr);
+  r.server(face_message("default", "d4", 0xff, {607, 293, 262, 620, 801, 107, 32767, 32767, 586, 649}));
+  CHECK(r.app.model().face == nullptr);  // eye rows off the bitmap: the blink would never repaint
+  r.server(face_message("default", "e5", 0xff, {607, 293, 262, 620, 801, 107, 508, 396, 586, 649}));
+  CHECK(r.app.model().face == nullptr);  // eye rows upside down
+  r.server(face_message("default", "f6", 0xff, {-5, 293, 262, 620, 801, 107, 396, 508, 586, 649}));
+  CHECK(r.app.model().face == nullptr);
+  r.server(face_message("default", "a7", 0xff, {0, 0, 1000, 1000, 0, 1000, 0, 1000, 500, 500}));
+  CHECK(r.app.model().face != nullptr);  // the edges are fine
+}
+
+TEST("faces: a late face or clear for the previous profile leaves this one's alone") {
+  Rig r;
+  r.bring_online_with_profiles(true, "ops");
+  r.server(R"({"type":"profile","profile":"default"})");
+  r.server(face_message("ops", "a1"));  // sent before the switch, read after it
+  CHECK(r.app.model().face == nullptr);
+  r.server(face_message("default", "b2"));
+  r.server(R"({"type":"face","profile":"ops"})");
+  CHECK(r.app.model().face && r.app.model().face->hash == "b2");
+}
+
+TEST("faces: an unpaired device shows the mascot and names no face") {
+  Rig r;
+  r.bring_online(true);
+  r.server(face_message("default", "a1"));
+  r.server(R"({"type":"unpaired"})");
+  CHECK(r.app.model().face == nullptr);
+  r.server(face_message("default", "a1"));  // a face still on its way
+  CHECK(r.app.model().face == nullptr);
+
+  Rig away;  // revoked while offline: the welcome says so
+  away.bring_online(true);
+  away.server(face_message("default", "a1"));
+  away.app.on_transport_closed("network flap");
+  away.advance(5000);
+  away.app.on_transport_open();
+  away.server(R"({"type":"challenge","nonce":"bjI=","enrolled":true})");
+  away.server(R"({"type":"welcome","session":"s2","heartbeat_s":20,"paired":false,"face":"a1"})");  // even named
+  CHECK(away.app.model().face == nullptr);
+  away.fake.sent.clear();
+  away.app.on_transport_closed("network flap");
+  away.advance(5000);
+  away.app.on_transport_open();
+  const Value* hello = away.fake.last("hello");
+  CHECK(hello && !hello->has("face"));
+}
+
+TEST("faces: a board without the memory for a face offers none and ignores one") {
+  hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
+  p.faces = false;
+  Rig r(p);
+  r.bring_online(true);
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello && !(*hello)["caps"].has("faces"));
+  r.server(face_message("default", "a1"));
+  CHECK(r.app.model().face == nullptr);
+}
+
+TEST("faces: a reconnect keeps the face only when the welcome names it") {
+  Rig r;
+  r.bring_online_with_profiles(true, "ops");
+  // Reconnects with `named` in the welcome; returns the face the hello named.
+  auto reconnect = [&](const std::string& named) {
+    r.fake.sent.clear();
+    r.app.on_transport_closed("network flap");
+    r.advance(5000);
+    r.app.on_transport_open();
+    const Value* hello = r.fake.last("hello");
+    const std::string held = hello ? (*hello)["face"].as_string() : "";
+    r.server(R"({"type":"challenge","nonce":"bjI=","enrolled":true})");
+    r.server(R"({"type":"welcome","session":"s2","heartbeat_s":20,"paired":true,)" + named +
+             R"("profile":"ops","profiles":[{"id":"default","name":"Hermes"},{"id":"ops","name":"Ops"}]})");
+    return held;
+  };
+  r.server(face_message("ops", "a1"));
+  CHECK_EQ(reconnect(R"("face":"a1",)"), std::string("a1"));
+  CHECK(r.app.model().face && r.app.model().face->hash == "a1");  // the same face stays
+  CHECK_EQ(reconnect(R"("face":"b2",)"), std::string("a1"));
+  CHECK(r.app.model().face == nullptr);  // another one is coming: the mascot meanwhile
+  r.server(face_message("ops", "a1"));
+  CHECK_EQ(reconnect(""), std::string("a1"));
+  CHECK(r.app.model().face == nullptr);  // none named: a new route, or a server without faces
+}
+
+TEST("faces: another profile shows the mascot until its own face arrives") {
+  Rig r;
+  r.bring_online_with_profiles(true, "ops");
+  r.server(face_message("ops", "a1"));
+  r.server(R"({"type":"profile","profile":"default","error":"busy"})");  // a refusal keeps it
+  CHECK(r.app.model().face != nullptr);
+  r.server(R"({"type":"profile","profile":"default"})");
+  CHECK(r.app.model().face == nullptr);
+  r.server(face_message("default", "b2"));
+  CHECK(r.app.model().face && r.app.model().face->hash == "b2");
+
+  // A welcome that names another profile than the face's drops it too.
+  r.app.on_transport_closed("network flap");
+  r.advance(5000);
+  r.app.on_transport_open();
+  r.server(R"({"type":"challenge","nonce":"bjI=","enrolled":true})");
+  r.server(R"({"type":"welcome","session":"s2","heartbeat_s":20,"paired":true,"profile":"ops",)"
+           R"("profiles":[{"id":"default","name":"Hermes"},{"id":"ops","name":"Ops"}]})");
+  CHECK(r.app.model().face == nullptr);
+}
+
+TEST("faces: a face made of the mascot's own bitmaps draws the mascot") {
+  std::vector<uint8_t> data;
+  for (int size : {64, 96, 144, 192})
+    for (auto frame : {hg::mascot::Frame::Idle, hg::mascot::Frame::Blink, hg::mascot::Frame::Talk}) {
+      const hg::mascot::Bitmap* b = hg::mascot::pick(size, frame);
+      data.insert(data.end(), b->bits, b->bits + (size + 7) / 8 * size);
+    }
+  const hg::mascot::Anchors& a = hg::mascot::anchors();
+  for (int v : {a.ear_cup.x, a.ear_cup.y, a.mouth.x, a.mouth.y, a.head_top_right.x, a.head_top_right.y, a.eyes_y0,
+                a.eyes_y1, a.mouth_y0, a.mouth_y1}) {
+    data.push_back(static_cast<uint8_t>(v & 0xff));
+    data.push_back(static_cast<uint8_t>(v >> 8));
+  }
+  Rig r;
+  r.bring_online(true);
+  r.advance(100);
+  const std::vector<uint16_t> mascot = r.fake.fb;
+  r.server(R"({"type":"face","profile":"default","hash":"m1","bits":")" +
+           hg::crypto::base64_encode(data.data(), data.size()) + R"("})");
+  r.advance(10);
+  CHECK(r.app.model().face != nullptr);
+  CHECK_EQ(pixels_changed(mascot, r.fake.fb), size_t(0));
+}
+
+namespace {
+
+hg::DeviceProfile colour_profile() {
+  hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
+  p.colour_face_alloc = std::malloc;
+  return p;
+}
+
+int colour_px(Rig& r) {
+  const Value* hello = r.fake.last("hello");
+  return hello ? static_cast<int>((*hello)["caps"]["faces"]["px"].as_int(0)) : 0;
+}
+
+// A colour face's face.start (docs/protocol.md#faces); `tail` is everything after the size.
+std::string colour_start(const std::string& profile, const std::string& hash, int px, int stream = 7,
+                         const std::string& tail = R"("format":"rgb565","anchors":[607,293,262,620,801,107,396,508,586,649])") {
+  return R"({"type":"face.start","stream":)" + std::to_string(stream) + R"(,"profile":")" + profile + R"(","hash":")" +
+         hash + R"(","width":)" + std::to_string(px) + R"(,"height":)" + std::to_string(px) + "," + tail + "}";
+}
+
+// Bytes [from, to) of a colour face's RGB565 on binary channel 4, in 4096-byte chunks. Every pixel is
+// `pixel` except a transparent (0x0000) square in the middle. Chunk i (counted from the face's first
+// byte) goes with sequence number `seq(i)`, i itself by default.
+void push_pixel(std::vector<uint8_t>& data, uint16_t v) {
+  data.push_back(static_cast<uint8_t>(v & 0xff));
+  data.push_back(static_cast<uint8_t>(v >> 8));
+}
+
+std::vector<uint8_t> idle_pixels(int px, uint16_t pixel) {
+  std::vector<uint8_t> data;
+  for (int y = 0; y < px; ++y)
+    for (int x = 0; x < px; ++x) {
+      const bool hole = x >= px / 4 && x < 3 * px / 4 && y >= px / 4 && y < 3 * px / 4;
+      push_pixel(data, hole ? 0 : pixel);
+    }
+  return data;
+}
+
+// Bytes [from, to) of `data` on binary channel 4, in 4096-byte chunks, as send_pixels sends them.
+void send_bytes(Rig& r, const std::vector<uint8_t>& data, int stream = 7, size_t from = 0, size_t to = SIZE_MAX,
+                uint16_t (*seq)(uint16_t) = nullptr) {
+  to = std::min(to, data.size());
+  for (size_t off = from; off < to; off += 4096) {
+    const size_t len = std::min<size_t>(4096, to - off);
+    const auto i = static_cast<uint16_t>(off / 4096);
+    std::vector<uint8_t> frame(hg::proto::kBinaryHeader + len);
+    hg::proto::write_binary_header(frame.data(), hg::proto::Channel::Face, static_cast<uint8_t>(stream),
+                                   seq ? seq(i) : i);
+    std::copy(data.begin() + static_cast<long>(off), data.begin() + static_cast<long>(off + len),
+              frame.begin() + hg::proto::kBinaryHeader);
+    r.app.on_transport_binary(frame.data(), frame.size());
+  }
+}
+
+void send_pixels(Rig& r, int px, uint16_t pixel, int stream = 7, size_t from = 0, size_t to = SIZE_MAX,
+                 uint16_t (*seq)(uint16_t) = nullptr) {
+  send_bytes(r, idle_pixels(px, pixel), stream, from, to, seq);
+}
+
+std::string colour_end(int stream = 7) { return R"({"type":"face.end","stream":)" + std::to_string(stream) + "}"; }
+
+// A colour face as the server sends it: face.start, the pixels, face.end. Only the first `send` bytes
+// go; `end` false leaves out face.end.
+void send_colour_face(Rig& r, const std::string& profile, const std::string& hash, int px, uint16_t pixel,
+                      size_t send = SIZE_MAX, bool end = true, int stream = 7) {
+  r.server(colour_start(profile, hash, px, stream));
+  send_pixels(r, px, pixel, stream, 0, send);
+  if (end) r.server(colour_end(stream));
+}
+
+size_t count_px(const std::vector<uint16_t>& fb, uint16_t v) {
+  return static_cast<size_t>(std::count(fb.begin(), fb.end(), v));
+}
+
+constexpr uint16_t kRose = hg::rgb565(220, 60, 120);
+
+}  // namespace
+
+TEST("colour faces: a board with room offers its Ready face size and draws the face in colour") {
+  Rig r(colour_profile());
+  r.bring_online(true);
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello && (*hello)["caps"]["faces"]["v"].as_int() == 2);
+  const int px = colour_px(r);
+  CHECK(px >= 64 && px <= 192);
+  r.advance(100);
+  send_colour_face(r, "default", "c1", px, kRose);
+  r.advance(100);
+  CHECK(r.app.model().face && r.app.model().face->hash == "c1");
+  // The ring of colour shows; the transparent middle shows the background, not black.
+  CHECK_EQ(count_px(r.fake.fb, kRose), static_cast<size_t>(px * px - (px / 2) * (px / 2)));
+  r.server(R"({"type":"face","profile":"default"})");
+  r.advance(100);
+  CHECK(r.app.model().face == nullptr);
+  CHECK_EQ(count_px(r.fake.fb, kRose), size_t(0));
+}
+
+TEST("colour faces: a board without room keeps one-colour faces") {
+  Rig r;  // no colour_face_alloc: a board without PSRAM to spare
+  r.bring_online(true);
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello && (*hello)["caps"]["faces"].as_int() == 1);
+  send_colour_face(r, "default", "c1", 144, kRose);
+  CHECK(r.app.model().face == nullptr);
+
+  hg::DeviceProfile full = colour_profile();  // PSRAM with no room left after the framebuffer
+  full.colour_face_alloc = [](size_t) -> void* { return nullptr; };
+  Rig no_room(full);
+  no_room.bring_online(true);
+  hello = no_room.fake.last("hello");
+  CHECK(hello && (*hello)["caps"]["faces"].as_int() == 1);
+  no_room.server(face_message("default", "a1"));
+  CHECK(no_room.app.model().face && no_room.app.model().face->hash == "a1");  // one-colour faces still
+}
+
+TEST("colour faces: a bad start or a broken transfer leaves the mascot") {
+  Rig r(colour_profile());
+  r.bring_online_with_profiles(true, "default");
+  const int px = colour_px(r);
+  send_colour_face(r, "default", "c1", px, kRose);
+  CHECK(r.app.model().face != nullptr);
+  r.server(colour_start("default", "c2", px + 1));  // not the size the device asked for,
+  send_pixels(r, px, kRose);                        // even when the device's size follows
+  r.server(colour_end());
+  CHECK(r.app.model().face == nullptr);
+  send_colour_face(r, "default", "", px, kRose);  // no hash
+  CHECK(r.app.model().face == nullptr);
+  send_colour_face(r, "default", "c3", px, kRose, 4096 * 3);  // cut short, then face.end
+  CHECK(r.app.model().face == nullptr);
+  send_colour_face(r, "default", "c4", px, kRose, SIZE_MAX, false);  // no face.end
+  CHECK(r.app.model().face == nullptr);
+  r.server(R"({"type":"face.end","stream":8})");  // another stream's end
+  CHECK(r.app.model().face == nullptr);
+  r.server(R"({"type":"face.end","stream":7})");
+  CHECK(r.app.model().face && r.app.model().face->hash == "c4");
+
+  // Anchors off the face, or not ten of them, or another format: refused like a malformed one-bit face,
+  // even when a whole face follows on the start's stream.
+  for (const char* bad : {R"("anchors":[607,293,262,620,801,107,508,396,586,649],"format":"rgb565")",
+                          R"("anchors":[607,293,262,620,801,107,396,508,586],"format":"rgb565")",
+                          R"("anchors":[607,293,262,620,801,107,396,508,586,1001],"format":"rgb565")",
+                          R"("anchors":[607,293,262,620,801,107,396,508,586,649],"format":"jpeg")"}) {
+    send_colour_face(r, "default", "c5", px, kRose);
+    r.server(colour_start("default", "c6", px, 9, bad));
+    CHECK(r.app.model().face == nullptr);
+    send_pixels(r, px, kRose, 9);
+    r.server(colour_end(9));
+    CHECK(r.app.model().face == nullptr);
+  }
+
+  // A chunk skipped or sent twice drops the transfer, even when the bytes add up to a whole face.
+  for (uint16_t (*seq)(uint16_t) : {+[](uint16_t i) -> uint16_t { return i < 2 ? i : i + 1; },
+                                    +[](uint16_t i) -> uint16_t { return i < 2 ? i : i - 1; }}) {
+    r.server(colour_start("default", "c9", px));
+    send_pixels(r, px, kRose, 7, 0, SIZE_MAX, seq);
+    r.server(colour_end());
+    CHECK(r.app.model().face == nullptr);
+  }
+
+  // One byte too many drops the transfer.
+  send_colour_face(r, "default", "c7", px, kRose, SIZE_MAX, false);
+  std::vector<uint8_t> extra(hg::proto::kBinaryHeader + 2, 0);
+  const auto next_seq = static_cast<uint16_t>((px * px * 2 + 4095) / 4096);
+  hg::proto::write_binary_header(extra.data(), hg::proto::Channel::Face, 7, next_seq);
+  r.app.on_transport_binary(extra.data(), extra.size());
+  r.server(R"({"type":"face.end","stream":7})");
+  CHECK(r.app.model().face == nullptr);
+
+  // Another profile's face, late after a switch, is not this profile's.
+  send_colour_face(r, "ops", "c8", px, kRose);
+  CHECK(r.app.model().face == nullptr);
+}
+
+TEST("colour faces: a new start replaces a transfer, and nothing resumes one that was cut off") {
+  constexpr uint16_t kTeal = hg::rgb565(40, 180, 170);
+  Rig r(colour_profile());
+  r.bring_online(true);
+  const int px = colour_px(r);
+  const size_t half = static_cast<size_t>(px * px) / 4096 * 4096;  // whole chunks, about half the face
+
+  // A new face takes over mid-way; the old stream's late chunks and end change nothing.
+  r.server(colour_start("default", "c1", px, 7));
+  send_pixels(r, px, kRose, 7, 0, half);
+  r.server(colour_start("default", "c2", px, 8));
+  send_pixels(r, px, kRose, 7, half);  // the rest of c1, late
+  r.server(colour_end(7));
+  CHECK(r.app.model().face == nullptr);
+  send_pixels(r, px, kTeal, 8);
+  r.server(colour_end(8));
+  CHECK(r.app.model().face && r.app.model().face->hash == "c2");
+  r.advance(100);
+  CHECK_EQ(count_px(r.fake.fb, kRose), size_t(0));
+  CHECK_EQ(count_px(r.fake.fb, kTeal), static_cast<size_t>(px * px - (px / 2) * (px / 2)));
+
+  // A reconnect cuts a transfer: its remaining chunks and end on the new connection install nothing.
+  r.server(colour_start("default", "c3", px));
+  send_pixels(r, px, kRose, 7, 0, half);
+  r.app.on_transport_closed("network flap");
+  r.advance(5000);
+  r.app.on_transport_open();
+  r.server(R"({"type":"challenge","nonce":"bjI=","enrolled":true})");
+  r.server(R"({"type":"welcome","session":"s2","heartbeat_s":20,"paired":true,"face":"c2"})");
+  send_pixels(r, px, kRose, 7, half);
+  r.server(colour_end());
+  CHECK(r.app.model().face == nullptr);
+
+  // So does an unpair, even when the device is paired again before the rest arrives.
+  r.server(colour_start("default", "c4", px));
+  send_pixels(r, px, kRose, 7, 0, half);
+  r.server(R"({"type":"unpaired"})");
+  r.server(R"({"type":"paired"})");
+  send_pixels(r, px, kRose, 7, half);
+  r.server(colour_end());
+  CHECK(r.app.model().face == nullptr);
+}
+
+TEST("colour faces: stream ids, sizes and anchors must be whole numbers in range") {
+  Rig r(colour_profile());
+  r.bring_online(true);
+  const int px = colour_px(r);
+  const std::string size = std::to_string(px);
+  const std::string anchors = R"("anchors":[607,293,262,620,801,107,396,508,586,649])";
+  // Each start is refused, so the whole face that follows on stream 7 never shows.
+  for (const std::string& bad : {
+           R"({"type":"face.start","stream":7.5,"profile":"default","hash":"c1","width":)" + size + R"(,"height":)" +
+               size + R"(,"format":"rgb565",)" + anchors + "}",
+           R"({"type":"face.start","stream":1e100,"profile":"default","hash":"c1","width":)" + size + R"(,"height":)" +
+               size + R"(,"format":"rgb565",)" + anchors + "}",
+           R"({"type":"face.start","stream":7,"profile":"default","hash":"c1","width":)" + size + R"(.5,"height":)" +
+               size + R"(,"format":"rgb565",)" + anchors + "}",
+           colour_start("default", "c1", px, 7, R"("format":"rgb565","anchors":[607.5,293,262,620,801,107,396,508,586,649])"),
+           colour_start("default", "c1", px, 7, R"("format":"rgb565","anchors":[1e100,293,262,620,801,107,396,508,586,649])")}) {
+    r.server(bad);
+    send_pixels(r, px, kRose);
+    r.server(colour_end());
+    CHECK(r.app.model().face == nullptr);
+  }
+  // face.end names its stream exactly too.
+  r.server(colour_start("default", "c2", px));
+  send_pixels(r, px, kRose);
+  r.server(R"({"type":"face.end","stream":7.5})");
+  CHECK(r.app.model().face == nullptr);
+  r.server(colour_end());
+  CHECK(r.app.model().face && r.app.model().face->hash == "c2");
+}
+
+TEST("colour faces: a switch mid-transfer shows the mascot, and a reconnect keeps a named face") {
+  Rig r(colour_profile());
+  r.bring_online_with_profiles(true, "ops");
+  const int px = colour_px(r);
+  send_colour_face(r, "ops", "c1", px, kRose, SIZE_MAX, false);
+  r.server(R"({"type":"profile","profile":"default"})");
+  r.server(R"({"type":"face.end","stream":7})");
+  CHECK(r.app.model().face == nullptr);
+  send_colour_face(r, "default", "c2", px, kRose);
+  CHECK(r.app.model().face && r.app.model().face->hash == "c2");
+
+  r.fake.sent.clear();
+  r.app.on_transport_closed("network flap");
+  r.advance(5000);
+  r.app.on_transport_open();
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello && (*hello)["face"].as_string() == "c2");
+  r.server(R"({"type":"challenge","nonce":"bjI=","enrolled":true})");
+  r.server(R"({"type":"welcome","session":"s2","heartbeat_s":20,"paired":true,"face":"c2"})");
+  CHECK(r.app.model().face && r.app.model().face->hash == "c2");
+  r.advance(100);
+  CHECK(count_px(r.fake.fb, kRose) > 0);
+
+  // A one-colour face file replaces it, and a colour face replaces that.
+  r.server(face_message("default", "a1"));
+  CHECK(r.app.model().face && r.app.model().face->hash == "a1" && !r.app.model().face->rgb565);
+  send_colour_face(r, "default", "c3", px, kRose);
+  CHECK(r.app.model().face && r.app.model().face->hash == "c3" && r.app.model().face->rgb565);
+
+  // A transfer cut by a reconnect is not named in the hello.
+  send_colour_face(r, "default", "c4", px, kRose, 4096, false);
+  r.fake.sent.clear();
+  r.app.on_transport_closed("network flap");
+  r.advance(5000);
+  r.app.on_transport_open();
+  hello = r.fake.last("hello");
+  CHECK(hello && !hello->has("face"));
+}
+
+namespace {
+
+constexpr uint16_t kTeal = hg::rgb565(40, 180, 170);
+constexpr uint16_t kAmber = hg::rgb565(240, 160, 40);
+const std::string kAnchors = R"("format":"rgb565","anchors":[607,293,262,620,801,107,396,508,586,649])";
+
+// A moving colour face's pixels: the idle picture send_pixels sends, then `blink_rows` rows of kTeal, then
+// `talk_rows` rows of kAmber.
+std::vector<uint8_t> moving_pixels(int px, int blink_rows, int talk_rows) {
+  std::vector<uint8_t> data = idle_pixels(px, kRose);
+  for (int i = 0; i < blink_rows * px; ++i) push_pixel(data, kTeal);
+  for (int i = 0; i < talk_rows * px; ++i) push_pixel(data, kAmber);
+  return data;
+}
+
+}  // namespace
+
+TEST("colour frames: a board with room for the bands offers frames; one with room for the still face only does not") {
+  Rig r(colour_profile());
+  r.bring_online(true);
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello && (*hello)["caps"]["faces"]["frames"].as_bool());
+
+  hg::DeviceProfile still = colour_profile();  // the 320x240 fake draws the face at 144: room for that alone
+  still.colour_face_alloc = [](size_t n) -> void* { return n > 144 * 144 * 2 ? nullptr : std::malloc(n); };
+  Rig s(still);
+  s.bring_online(true);
+  hello = s.fake.last("hello");
+  CHECK(hello && (*hello)["caps"]["faces"]["v"].as_int() == 2 && (*hello)["caps"]["faces"]["px"].as_int() == 144);
+  CHECK(hello && !(*hello)["caps"]["faces"].has("frames"));
+  s.server(colour_start("default", "m1", 144, 7, kAnchors + R"(,"blink":[10,4])"));  // refused: no room for it
+  send_bytes(s, moving_pixels(144, 4, 0));
+  s.server(colour_end());
+  CHECK(s.app.model().face == nullptr);
+  send_colour_face(s, "default", "c1", 144, kRose);
+  CHECK(s.app.model().face && s.app.model().face->hash == "c1");
+}
+
+TEST("colour frames: face.start names the bands, and the device takes exactly their bytes") {
+  Rig r(colour_profile());
+  r.bring_online(true);
+  const int px = colour_px(r);
+  const std::string bands = R"(,"blink":[10,6],"talk":[100,4])";
+  const std::vector<uint8_t> whole = moving_pixels(px, 6, 4);
+  auto start = [&](const std::string& hash, const std::string& tail) {
+    r.server(colour_start("default", hash, px, 7, kAnchors + tail));
+  };
+
+  start("m1", bands);
+  send_bytes(r, whole);
+  r.server(colour_end());
+  const hg::mascot::Face* f = r.app.model().face;
+  CHECK(f && f->hash == "m1");
+  CHECK(f && f->blink.y == 10 && f->blink.rows == 6 && f->talk.y == 100 && f->talk.rows == 4);
+  CHECK(f && f->blink.rgb565[0] == kTeal && f->blink.rgb565[6 * px - 1] == kTeal);
+  CHECK(f && f->talk.rgb565[0] == kAmber && f->talk.rgb565[4 * px - 1] == kAmber);
+
+  // Short of the bands, or a byte past them: dropped.
+  for (size_t len : {static_cast<size_t>(px * px * 2), whole.size() - 2 * px}) {
+    start("m2", bands);
+    send_bytes(r, whole, 7, 0, len);
+    r.server(colour_end());
+    CHECK(r.app.model().face == nullptr);
+  }
+  start("m3", bands);
+  std::vector<uint8_t> extra = whole;
+  extra.push_back(0);
+  send_bytes(r, extra);
+  r.server(colour_end());
+  CHECK(r.app.model().face == nullptr);
+
+  // A band that is not two whole numbers inside the face, or bands past half the face's rows together:
+  // the start is refused, so even the bytes it names, sent after it, show nothing.
+  const std::string half = std::to_string(px / 2);
+  for (auto [bad, rows] : std::initializer_list<std::pair<std::string, int>>{
+           {R"(,"blink":[10,0])", 0}, {R"(,"blink":[)" + std::to_string(px) + ",1]", 1},
+           {R"(,"blink":[)" + std::to_string(px - 3) + ",4]", 4}, {R"(,"blink":[-1,4])", 4},
+           {R"(,"blink":[10.5,4])", 4}, {R"(,"blink":[10,4,1])", 4}, {R"(,"blink":"10,4")", 4}, {R"(,"blink":[10])", 0},
+           {R"(,"blink":[0,)" + half + R"(],"talk":[100,1])", px / 2 + 1}}) {
+    start("m4", bad);
+    send_bytes(r, moving_pixels(px, rows, 0));
+    r.server(colour_end());
+    CHECK(r.app.model().face == nullptr);
+  }
+  start("m5", R"(,"blink":[0,)" + std::to_string(px / 2) + "]");  // half the rows exactly: fits
+  send_bytes(r, moving_pixels(px, px / 2, 0));
+  r.server(colour_end());
+  CHECK(r.app.model().face && r.app.model().face->blink.rows == px / 2);
+
+  // Either band alone.
+  start("m6", R"(,"talk":[100,4])");
+  send_bytes(r, moving_pixels(px, 0, 4));
+  r.server(colour_end());
+  f = r.app.model().face;
+  CHECK(f && f->blink.rows == 0 && f->talk.rows == 4 && f->talk.rgb565[0] == kAmber);
+}
+
+TEST("colour frames: the device blinks a colour face that has a blink band, and never one without") {
+  Rig r(colour_profile());
+  r.bring_online(true);
+  const int px = colour_px(r);
+  auto blinks = [&]() {
+    int seen = 0;
+    for (int i = 0; i < 90; ++i) {
+      r.advance(100);
+      seen += count_px(r.fake.fb, kTeal) > 0;
+    }
+    return seen;
+  };
+  r.server(colour_start("default", "m1", px, 7, kAnchors + R"(,"blink":[30,6])"));
+  send_bytes(r, moving_pixels(px, 6, 0));
+  r.server(colour_end());
+  const int with_band = blinks();
+  CHECK(with_band > 0 && with_band <= 6);  // two frames in every 45, as the mascot blinks
+  r.server(colour_start("default", "m2", px, 7, kAnchors + R"(,"talk":[30,6])"));
+  send_bytes(r, moving_pixels(px, 0, 6));
+  r.server(colour_end());
+  CHECK(r.app.model().face && r.app.model().face->hash == "m2");
+  CHECK_EQ(blinks(), 0);
+  CHECK_EQ(count_px(r.fake.fb, kAmber), size_t(0));  // not speaking: the mouth stays shut
+}
+
+TEST("clock: off by default, a long rest keeps the Ready screen") {
+  Rig r;
+  r.fake.backlight = true;
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  r.bring_online(true);
+  CHECK(!r.app.clock_enabled());
+  r.advance(40000);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK_EQ(r.fake.brightness, 100);
+}
+
+TEST("clock: the console checks clock and time_format, and both survive a restart") {
+  Rig r;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set clock 60"), std::string("@ok clock"));
+  CHECK(r.app.clock_enabled());
+  CHECK_EQ(r.app.console("get clock"), std::string(R"(@value {"key":"clock","value":"60"})"));
+  CHECK_EQ(r.app.console("set clock 4"), std::string("@error clock must be 0 (off) or 5..3600 seconds"));
+  CHECK_EQ(r.app.console("set clock 3601"), std::string("@error clock must be 0 (off) or 5..3600 seconds"));
+  CHECK_EQ(r.app.console("set clock soon"), std::string("@error clock must be 0 (off) or 5..3600 seconds"));
+  CHECK_EQ(r.app.console("set clock 0"), std::string("@ok clock"));
+  CHECK(!r.app.clock_enabled());
+  CHECK_EQ(r.app.console("set clock 3600"), std::string("@ok clock"));
+  CHECK_EQ(r.app.console("set time_format 12h"), std::string("@ok time_format"));
+  CHECK_EQ(r.app.console("set time_format 25h"), std::string("@error time_format must be 12h or 24h"));
+  CHECK_EQ(r.app.console("set time_format hour"), std::string("@error time_format must be 12h or 24h"));
+  hg::Hal hal = r.fake.hal();
+  hg::App again(hal, Rig::profile("ws://hermes.local:8765/gadget"));
+  again.begin();
+  CHECK(again.clock_enabled());
+  CHECK_EQ(again.console("get clock"), std::string(R"(@value {"key":"clock","value":"3600"})"));
+  CHECK_EQ(again.console("get time_format"), std::string(R"(@value {"key":"time_format","value":"12h"})"));
+}
+
+TEST("clock: it needs the time, and the settings body says so until then") {
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  r.advance(10000);  // no time of day yet
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 20 && r.app.model().detail != "Clock face"; ++i) r.app.on_button(hg::Button::Down, true);
+  CHECK_EQ(r.app.model().detail, std::string("Clock face"));
+  CHECK_EQ(r.app.model().body, std::string("5 seconds\nThe clock starts once the gadget knows the time."));
+  r.app.close_settings();
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  // It also needs a paired session: the pairing screen keeps it away.
+  Rig pairing;
+  pairing.fake.backlight = true;
+  pairing.fake.wall = kWallSaturday;
+  pairing.fake.wall_ok = true;
+  pairing.bring_online(false);
+  CHECK_EQ(pairing.app.console("set clock 5"), std::string("@ok clock"));
+  pairing.advance(10000);
+  CHECK(pairing.app.screen() == hg::Screen::Pairing);
+  CHECK(!pairing.app.clock_showing());  // no dim face behind the pairing screen
+  CHECK_EQ(pairing.fake.brightness, 100);
+  // A board without a display never runs the clock at all.
+  Rig blind;
+  blind.hal.display = nullptr;
+  blind.bring_online(true);
+  blind.fake.wall = kWallSaturday;
+  blind.fake.wall_ok = true;
+  CHECK_EQ(blind.app.console("set clock 5"), std::string("@ok clock"));
+  blind.advance(6000);
+  CHECK(!blind.app.clock_showing());
+  CHECK(blind.app.status_json().find("\"screen\":\"clock\"") == std::string::npos);
+}
+
+TEST("clock: after a rest it shows at 70% of the brightness setting") {
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.fake.brightness, 70);
+  CHECK_EQ(r.app.model().clock_time, std::string("09:41"));
+  CHECK_EQ(r.app.model().clock_date, std::string("SAT OCT 24"));
+  CHECK_EQ(int(r.app.model().clock_minute), 41);
+  CHECK(r.app.status_json().find("\"screen\":\"clock\"") != std::string::npos);
+  // A lit clock is a lit screen: Hermes is never told it is dark.
+  const Value* dark = last_display_state(r.fake);
+  CHECK(!dark || !(*dark)["display_sleeping"].as_bool());
+  // A very low brightness setting keeps a floor of 5.
+  Rig dim;
+  dim.fake.backlight = true;
+  dim.bring_online(true);
+  dim.fake.wall = kWallSaturday;
+  dim.fake.wall_ok = true;
+  CHECK_EQ(dim.app.console("set brightness 5"), std::string("@ok brightness"));
+  CHECK_EQ(dim.app.console("set clock 5"), std::string("@ok clock"));
+  dim.advance(6000);
+  CHECK(dim.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(dim.fake.brightness, 5);
+}
+
+TEST("clock: a tap ends it and records nothing; the name opens nothing; a hold talks; TALK records") {
+  Rig r(Rig::touch_profile());
+  r.fake.backlight = true;
+  r.bring_online_with_profiles();
+  const auto [nx, ny] = name_point(r);  // where the name sits on Ready, before any clock
+  CHECK(nx >= 0);
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  // In tap mode a quick tap on Ready records, so a tap that does nothing proves the swallow.
+  CHECK_EQ(r.app.console("set talk_mode tap"), std::string("@ok talk_mode"));
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.fake.brightness, 70);
+  hg::TouchGestures touch(r.app);
+  // A quick tap brings Ready back at full brightness and records nothing.
+  touch.update(true, 160, 120, r.fake.clock);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK_EQ(r.fake.brightness, 100);
+  touch.update(false, 0, 0, r.fake.clock + 30);
+  CHECK(r.fake.last("audio.start") == nullptr);
+  CHECK(!r.fake.mic_on);
+  // The name is no target on the clock: a tap there opens nothing either.
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  touch.update(true, nx, ny, r.fake.clock);
+  touch.update(false, 0, 0, r.fake.clock + 30);
+  CHECK(!r.app.profile_picker_open());
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK_EQ(r.app.console("set talk_mode hold"), std::string("@ok talk_mode"));
+  // The TALK button ends the clock and the press goes on, as on Ready.
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  r.app.on_button(hg::Button::Talk, true);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  CHECK(r.fake.mic_on);
+  r.app.on_button(hg::Button::Talk, false);
+  CHECK(r.fake.last("audio.start") != nullptr);
+  r.server(R"({"type":"reply","text":"Done."})");
+  for (int i = 0; i < 40 && r.app.screen() != hg::Screen::Clock; ++i) r.advance(1000);  // reply, linger, rest
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  // A hold on the clock still talks: the touch-down ends the clock, the hold records.
+  touch.update(true, 160, 120, r.fake.clock);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  r.advance(200);
+  touch.tick(r.fake.clock);
+  CHECK(r.fake.mic_on);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  touch.update(false, 0, 0, r.fake.clock);
+}
+
+TEST("clock: it gives way to whatever needs the screen, and comes back after a new rest") {
+  struct Battery : hg::Power {
+    std::optional<hg::PowerStatus> status = hg::PowerStatus{true, 3850, 65, false, false};
+    std::optional<hg::PowerStatus> read() override { return status; }
+    bool power_off() override { return true; }
+  } battery;
+  Rig r(Rig::motion_profile());
+  r.hal.power = &battery;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  CHECK_EQ(r.app.console("set face_down_sleep on"), std::string("@ok face_down_sleep"));
+  const auto showing = [&] {
+    for (int i = 0; i < 40 && r.app.screen() != hg::Screen::Clock; ++i) r.advance(1000);
+    CHECK(r.app.screen() == hg::Screen::Clock);
+  };
+  showing();
+  // A card shown until dismissed
+  r.server(R"({"type":"display","title":"Timer","body":"Pasta: 9 min","ttl_s":0})");
+  r.advance(200);
+  CHECK(r.app.screen() == hg::Screen::Card);
+  CHECK(!r.app.clock_showing());  // no dim face behind it
+  CHECK_EQ(r.fake.brightness, 100);
+  r.app.on_button(hg::Button::Cancel, true);
+  r.app.on_button(hg::Button::Cancel, false);  // dismisses the card
+  showing();
+  // A reply, spoken and then read
+  r.server(R"({"type":"reply","text":"It is sunny."})");
+  r.server(R"({"type":"audio.start","stream":3,"rate":16000,"format":"pcm16"})");
+  CHECK(r.app.in_turn());
+  r.fake.spk_draining = true;
+  r.advance(3000);
+  CHECK(r.app.screen() != hg::Screen::Clock);
+  r.fake.spk_draining = false;
+  r.server(R"({"type":"audio.end","stream":3})");
+  showing();
+  // A prompt
+  r.server(R"({"type":"prompt","id":"q1","title":"Allow?","text":"rm -rf build"})");
+  CHECK(r.app.screen() == hg::Screen::Prompt);
+  r.server(R"({"type":"prompt.close","id":"q1"})");
+  showing();
+  // A turn that stays thinking, and the hint its cancel flashes
+  r.app.on_button(hg::Button::Talk, true);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  r.advance(400);  // long enough to be sent
+  r.app.on_button(hg::Button::Talk, false);
+  r.server(R"({"type":"turn.start","turn":"t1"})");
+  r.advance(6000);  // past the rest: the turn still holds the screen, lit
+  CHECK(r.app.screen() == hg::Screen::Thinking);
+  CHECK(!r.app.clock_showing());
+  CHECK_EQ(r.fake.brightness, 100);
+  r.app.on_button(hg::Button::Cancel, true);
+  r.app.on_button(hg::Button::Cancel, false);  // cancelled: a hint flashes
+  r.advance(2000);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  r.advance(4000);
+  CHECK(r.app.screen() == hg::Screen::Ready);  // the hint flash holds the rest off
+  showing();
+  // A timer, and the alarm it becomes (never drawn at the clock's dim level)
+  r.server(R"({"type":"action","id":"t1","name":"timer.start","args":{"seconds":1,"label":"Tea"}})");
+  r.advance(200);
+  CHECK(r.app.screen() != hg::Screen::Clock);
+  r.advance(1500);
+  CHECK(r.app.screen() == hg::Screen::Alarm);
+  CHECK_EQ(r.fake.brightness, 100);  // the alarm wakes the screen, so never 70%
+  r.app.on_button(hg::Button::Talk, true);  // dismisses it
+  r.app.on_button(hg::Button::Talk, false);
+  showing();
+  // The settings menu
+  CHECK(r.app.open_settings());
+  r.advance(6000);  // a held-open menu keeps the clock off it
+  CHECK(r.app.screen() == hg::Screen::Settings);
+  CHECK(!r.app.clock_showing());
+  CHECK_EQ(r.fake.brightness, 100);
+  r.app.close_settings();
+  showing();
+  // A notice
+  r.server(R"({"type":"notice","text":"Back soon","ttl_s":1})");
+  r.advance(200);
+  CHECK(r.app.screen() != hg::Screen::Clock);
+  showing();
+  // The low-battery caption (10% or less, not on USB)
+  battery.status = hg::PowerStatus{true, 3600, 8, false, false};
+  r.advance(5100);  // the next power reading
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  battery.status = hg::PowerStatus{true, 3850, 65, false, false};
+  r.advance(5100);
+  showing();
+  // Face down
+  r.hold_still(0, 0, -1000, 1200);
+  CHECK_EQ(r.fake.brightness, 0);
+  CHECK(r.app.screen() != hg::Screen::Clock);
+  r.hold_still(0, 0, 1000, 500);  // turn it back over
+  CHECK_EQ(r.fake.brightness, 100);
+  showing();
+  // A dropped connection ends a showing clock; its screens take over, lit.
+  r.app.on_transport_closed("bye");
+  r.advance(300);
+  CHECK(!r.app.clock_showing());
+  CHECK_EQ(r.fake.brightness, 100);
+  // A fatal server error keeps the Error screen up, also lit, with no clock under it.
+  Rig err;
+  err.fake.backlight = true;
+  err.bring_online(true);
+  err.fake.wall = kWallSaturday;
+  err.fake.wall_ok = true;
+  CHECK_EQ(err.app.console("set clock 5"), std::string("@ok clock"));
+  err.advance(6000);
+  CHECK(err.app.screen() == hg::Screen::Clock);
+  err.server(R"({"type":"error","code":"protocol","message":"bad handshake"})");
+  CHECK(err.app.screen() == hg::Screen::Error);
+  err.advance(6000);
+  CHECK(err.app.screen() == hg::Screen::Error);
+  CHECK(!err.app.clock_showing());
+  CHECK_EQ(err.fake.brightness, 100);
+}
+
+TEST("clock: rest counts from the end of the speech and of the reply text") {
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  CHECK_EQ(r.app.console("set clock 10"), std::string("@ok clock"));
+  r.server(R"({"type":"reply","text":"It is sunny."})");
+  r.server(R"({"type":"audio.start","stream":3,"rate":16000,"format":"pcm16"})");
+  CHECK(r.app.in_turn());
+  r.fake.spk_draining = true;  // the speech is still playing
+  r.advance(15000);
+  CHECK(r.app.screen() != hg::Screen::Clock);
+  r.fake.spk_draining = false;
+  r.server(R"({"type":"audio.end","stream":3})");
+  r.advance(100);
+  CHECK(!r.app.in_turn());
+  // The reply text stays up for 20 s; the clock's own 10 s never start under it.
+  r.advance(9000);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  r.advance(11000);  // the linger runs out here
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  r.advance(11000);  // and only now the 10 s of rest have passed
+  CHECK(r.app.screen() == hg::Screen::Clock);
+}
+
+TEST("clock: the screen timeout dims and darkens it, and what wakes it comes back at the setting") {
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  CHECK_EQ(r.app.console("set clock 10"), std::string("@ok clock"));
+  CHECK_EQ(r.app.console("set screen_timeout 60"), std::string("@ok screen_timeout"));
+  r.advance(11000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.fake.brightness, 70);
+  r.advance(20000);  // half of the timeout: dim
+  CHECK_EQ(r.fake.brightness, 10);
+  // The session sits silent for over a minute: keep the heartbeat fed.
+  r.server(R"({"type":"ping"})");
+  r.advance(30000);  // the timeout: dark, and the dark ends the clock
+  CHECK_EQ(r.fake.brightness, 0);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  const Value* dark = last_display_state(r.fake);
+  CHECK(dark && (*dark)["display_sleeping"].as_bool());
+  r.app.on_button(hg::Button::Talk, true);  // the next input wakes to Ready
+  CHECK_EQ(r.fake.brightness, 100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  r.app.on_button(hg::Button::Talk, false);
+  // A clock that starts on a dimmed screen keeps the dim level.
+  CHECK_EQ(r.app.console("set screen_timeout 40"), std::string("@ok screen_timeout"));
+  CHECK_EQ(r.app.console("set clock 25"), std::string("@ok clock"));
+  r.server(R"({"type":"ping"})");
+  r.advance(21000);
+  CHECK_EQ(r.fake.brightness, 10);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  r.advance(5000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.fake.brightness, 10);
+  r.advance(15000);  // the timeout darkens the dimmed clock
+  CHECK_EQ(r.fake.brightness, 0);
+  r.app.on_button(hg::Button::Talk, true);
+  CHECK_EQ(r.fake.brightness, 100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  r.app.on_button(hg::Button::Talk, false);
+  // The PWR key turns a lit clock's screen off; the next press wakes to Ready.
+  CHECK_EQ(r.app.console("set screen_timeout 3600"), std::string("@ok screen_timeout"));
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.fake.brightness, 70);
+  r.app.on_power_key();
+  CHECK_EQ(r.fake.brightness, 0);
+  r.advance(100);
+  CHECK(r.app.screen() != hg::Screen::Clock);
+  r.app.on_power_key();
+  CHECK_EQ(r.fake.brightness, 100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  // A settings change on a dark screen lights it at the brightness setting.
+  r.app.on_power_key();
+  CHECK_EQ(r.fake.brightness, 0);
+  CHECK_EQ(r.app.console("set volume 40"), std::string("@ok volume"));
+  CHECK_EQ(r.fake.brightness, 100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+}
+
+TEST("clock: a screen.brightness action on the clock keeps 70% of the new level") {
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.fake.brightness, 70);
+  r.server(R"({"type":"action","id":"b1","name":"screen.brightness","args":{"percent":50}})");
+  CHECK_EQ(r.fake.brightness, 35);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+}
+
+TEST("clock: the settings item cycles Off, 30 s, 1 min, 2 min and 5 min") {
+  Rig r;
+  r.fake.backlight = true;
+  r.fake.wall = kWallSaturday;
+  r.fake.wall_ok = true;
+  r.bring_online(true);
+  CHECK(r.app.open_settings());
+  for (int i = 0; i < 20 && r.app.model().detail != "Clock face"; ++i) r.app.on_button(hg::Button::Down, true);
+  CHECK_EQ(r.app.model().detail, std::string("Clock face"));
+  CHECK_EQ(r.app.model().body, std::string("Off\nSelect to show a clock after a rest."));
+  const auto select = [&] {
+    r.app.on_button(hg::Button::Talk, true);
+    r.app.on_button(hg::Button::Talk, false);
+  };
+  select();
+  CHECK_EQ(r.fake.kv["clock"], std::string("30"));
+  CHECK_EQ(r.app.model().body, std::string("30 seconds\nA dim clock appears after this much rest."));
+  select();
+  CHECK_EQ(r.fake.kv["clock"], std::string("60"));
+  select();
+  CHECK_EQ(r.fake.kv["clock"], std::string("120"));
+  select();
+  CHECK_EQ(r.fake.kv["clock"], std::string("300"));
+  CHECK_EQ(r.app.model().body, std::string("300 seconds\nA dim clock appears after this much rest."));
+  select();
+  CHECK_EQ(r.fake.kv["clock"], std::string("0"));
+  CHECK_EQ(r.app.model().body, std::string("Off\nSelect to show a clock after a rest."));
+}
+
+TEST("clock: the face's strings in 12- and 24-hour time and in Spanish") {
+  Rig r;
+  r.fake.backlight = true;
+  r.bring_online(true);
+  r.fake.wall_ok = true;
+  CHECK_EQ(r.app.console("set clock 5"), std::string("@ok clock"));
+  CHECK_EQ(r.app.console("set time_format 12h"), std::string("@ok time_format"));
+  r.fake.wall = kWallSaturday;  // Saturday 09:41
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.app.model().clock_time, std::string("9:41"));
+  CHECK_EQ(r.app.model().clock_date, std::string("SAT OCT 24"));
+  r.fake.wall = kWallMidnight;  // Sunday 00:05
+  r.advance(200);
+  CHECK_EQ(r.app.model().clock_time, std::string("12:05"));
+  CHECK_EQ(r.app.model().clock_date, std::string("SUN OCT 25"));
+  CHECK_EQ(r.app.console("set time_format 24h"), std::string("@ok time_format"));
+  CHECK(r.app.screen() != hg::Screen::Clock);  // a setting change ends the clock
+  r.advance(6000);
+  CHECK_EQ(r.app.model().clock_time, std::string("00:05"));
+  CHECK_EQ(r.app.console("set language es"), std::string("@ok language"));
+  r.advance(6000);
+  CHECK(r.app.screen() == hg::Screen::Clock);
+  CHECK_EQ(r.app.model().clock_date, std::string("DOM 25 OCT"));
+  r.fake.wall = kWallSaturday;
+  r.advance(200);
+  CHECK_EQ(r.app.model().clock_date, std::string("SÁB 24 OCT"));
+  CHECK_EQ(r.app.model().clock_time, std::string("09:41"));
 }
