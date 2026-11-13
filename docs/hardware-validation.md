@@ -10,23 +10,33 @@ Firmware builds and simulator tests check software behavior. A physical verifica
 
 | Model | Display and input | Audio | Power support | Verification |
 |---|---|---|---|---|
+| M5Stack Cardputer ADV, K132-Adv / Stamp-S3A | ST7789 240x135; G0 and TCA8418 keyboard; local ASCII editor | ES8311 microphone and speaker, BCLK-derived clock | Calibrated battery voltage and screen timeout; mechanical power switch; no charge-state or percentage | Experimental; [port status](#cardputer-adv-port-status); full physical checklist pending |
 | ESP32-S3-DevKitC-1 N8R8 breadboard | Wired ST7789, TALK and CANCEL buttons | Wired I2S microphone; optional MAX98357A speaker | External power | CI build; physical report not recorded |
 | Waveshare ESP32-S3-LCD-1.54, SKUs 33866/33867, and Touch-LCD-1.54, SKUs 33868/33869 | ST7789 240×240; BOOT, PLUS and PWR (screen on/off, hold to power off); CST816 touch on the touch SKUs | ES7210 microphones and ES8311 speaker | Calibrated voltage, charging signal, battery latch and screen timeout; idle CPU at 80 MHz and light sleep while dozing on battery; USB bypasses shutdown | CI build; physical report not recorded |
+| Waveshare ESP32-S3-Touch-LCD-1.83, SKUs 32790/32791 | ST7789P 240×284; CST816D touch, BOOT and PWR (short press from the AXP2101 turns the screen off and on) | ES7210 microphones (MIC1 and MIC2) and ES8311 speaker; echo reference unused | AXP2101 voltage, charging and external power; ALDO1 at 3.3 V for the microphone; no measured battery curve; IMU, RTC and TF card unused | Experimental; firmware builds; not run on a board; full checklist not completed |
+| Waveshare ESP32-S3-Touch-AMOLED-1.32 | CO5300 466×466; CST820 touch, BOOT, and PWR on GPIO 17 (short press turns the screen off and on, a hold releases the latch) | One ES8311 for the microphone and the speaker | GPIO 18 held high keeps the battery latch on; no battery voltage pin in the sources used here, so no percentage and no measured curve | Experimental; firmware builds; not run on a board; full checklist not completed |
+| Waveshare ESP32-S3-Touch-AMOLED-1.43C | CO5300 466×466; CST820 touch and BOOT. Not the older 1.43 board | ES7210 microphones (MIC1 and MIC2) and ES8311 speaker; MIC3 playback reference unused | GPIO 18 held high enables the codec LDO; GPIO 4 reads the cell through a divider of two; GPIO 7 is low while charging; no latch and no measured curve | Experimental; firmware builds; not run on a board; full checklist not completed |
 | Waveshare ESP32-S3-Touch-AMOLED-1.75 | CO5300 466×466; CST9217 touch, BOOT and PWR; QMI8658 motion sensor; PCF85063 RTC | ES7210 microphones and ES8311 speaker output | AXP2101 readings and local power-off; optional screen timeout; face-down sleep (off by default); resting clock (off by default) | CI build; physical report not recorded; the face-down sleep axes were checked on one unit (x standing, z face down; y derived, not measured; the 1.75C and the other QMI8658 boards not checked); the resting clock was checked on one unit (the PCF85063 sets the time at boot, network time sets the PCF85063, the face shows after the rest, a tap brings Ready back without recording; the settings item, hold to talk, the 12-hour format, the backlight level while the face shows and the 2.06 and 2.16 RTCs not checked) |
 | Waveshare ESP32-S3-Touch-AMOLED-1.75C, SKUs 33691/33692 | CO5300 466×466; CST9217 touch, BOOT, and PWR short press for screen sleep | ES7210 microphones and ES8311 onboard speaker | AXP2101 readings, audio supply and local power-off; screen timeout; amplifier off between sounds; idle CPU at 80 MHz; battery percent from measured curves; light sleep while dozing on battery | Experimental; [SKU 33691 report](#waveshare-amoled-175c-physical-report) covers the checklist on a working branch, not a `main` build; PCB revision not marked |
 | Waveshare ESP32-S3-Touch-AMOLED-1.8, V2 only | CO5300 368×448; CST820 touch, BOOT and PWR (CANCEL, through the TCA9554) | ES8311 analog microphone and speaker output | AXP2101 readings and local power-off; display/touch reset through a TCA9554 expander | Experimental; physical smoke check only (boot, display, I2C devices present, codecs and the touch, speaker and microphone tasks start); touch, microphone capture, speaker playback and battery not verified; full checklist not completed |
-| Waveshare ESP32-S3-Touch-AMOLED-2.06 (watch) | CO5300 410×502; FT3168 touch, BOOT and PWR short press for screen sleep | ES7210 microphones and ES8311 onboard speaker | AXP2101 readings and local power-off; screen timeout; amplifier off between sounds; idle CPU at 80 MHz; light sleep disabled pending touch wake support | Experimental; [partial report](#waveshare-amoled-206-partial-physical-report): display, touch, buttons, voice turns and tap mode on USB power; network loss, OTA, battery operation and a long session not verified |
-| Waveshare ESP32-S3-Touch-AMOLED-2.16, SKU 33969 | CO5300 480×480; CST9220 touch, BOOT and PWR short press for screen sleep | ES7210 microphones and ES8311 speaker output | AXP2101 readings and local power-off; battery header, battery operation not tested | Experimental; [physical smoke check](#waveshare-amoled-216-physical-smoke-check) on USB power only: boot, display, both codecs, the touch task, the AXP2101 and the Wi-Fi setup network start; touch, microphone capture, speaker playback, pairing and battery not verified; full checklist not completed |
+| Waveshare ESP32-S3-Touch-AMOLED-2.06 (watch) | CO5300 410×502; FT3168 touch, BOOT and PWR short press for screen sleep | ES7210 microphones and ES8311 onboard speaker | AXP2101 readings and local power-off; screen timeout; amplifier off between sounds; idle CPU at 80 MHz; light sleep while dozing on battery, woken by the touch INT; battery percent from a measured discharge curve | Experimental; [partial report](#waveshare-amoled-206-partial-physical-report): display, touch, buttons, voice turns and tap mode on USB power; [light sleep report](#waveshare-amoled-206-light-sleep-report): taps and buttons wake a dozing watch on battery; [battery report](#waveshare-amoled-206-battery-report): one full discharge, 8 h 14 min with light use; network loss and OTA not verified |
+| Waveshare ESP32-S3-Touch-AMOLED-2.16, SKU 33969 | CO5300 480×480; CST9220 touch, BOOT and PWR short press for screen sleep | ES7210 microphones and ES8311 speaker output | AXP2101 readings and local power-off; battery header, battery operation not tested | Experimental; [physical smoke check](#waveshare-amoled-216-physical-smoke-check) on USB power only: boot, display, both codecs, the touch task, the AXP2101 and the Wi-Fi setup network start; [partial report](#waveshare-amoled-216-partial-physical-report) on 0.5.0: pairing, a complete voice turn with a spoken reply, device actions (`speaker.volume`) and a join to a real Wi-Fi network; touch coordinates, the PWR key, OTA, persistence and battery not verified; full checklist not completed |
 | Waveshare ESP32-S3-Touch-LCD-1.85C V2 / PCB Rev2.0 only | ST77916 360×360 round QSPI LCD; CST816 touch and BOOT | ES8311 + ES7210 dual analog mic slots, NS4150B PA; mono transport; no software AEC | USB/battery switch; screen timeout; no battery telemetry or software shutdown | Experimental; [partial Rev2.0 report](#waveshare-185c-v2-partial-physical-report); full checklist not completed |
+| Waveshare ESP32-S3-Touch-LCD-1.46, 1.46B and 1.46C, one wiki pin table | SPD2010 412×412 round QSPI, inversion off, no axis swap, no mirror; SPD2010 touch at 0x53, INT GPIO 4, a startup read if INT is already low, and another read while INT stays low after a failed read; BOOT on GPIO 0; 282 px/in from the diameter | MSM261S4030H0R on GPIO 15, 2 and 39, 24-bit sample in the right 32-bit slot (L/R tied to 3V3); PCM5101 speaker on GPIO 48, 38 and 47; no amplifier-enable pin | TCA9554 reset mask 0x03; backlight GPIO 5 active high; QMI8658, PCF85063, TF card, battery, volume knob and PWR unused | Experimental; firmware builds; not run on a board; full checklist not completed |
 | Waveshare ESP32-S3-Knob-Touch-LCD-1.8 (ESP32-S3R8, 16 MB flash, 8 MB octal PSRAM) | SH8601 360×360 round QSPI LCD; CST816S touch, rotary encoder and BOOT | One PDM microphone; no speaker output (the PCM5100A headphone DAC is not driven) | USB power; battery ADC, charging and haptics not read | Experimental; contributor smoke test (display, hold-to-talk touch, microphone capture through a voice turn with a text reply); full checklist not completed |
 | Espressif ESP-VoCat, v1.2 only (ESP32-S3 rev v0.2, 16 MB flash, 16 MB octal PSRAM) | ST77916 360×360 round QSPI LCD; CST816S touch and BOOT | ES7210 microphones (MIC1 captured, mono transport) and ES8311 speaker through an NS4150B; MIC3 speaker loopback unused | GPIO power switches for the LCD/SD rail and the codec supply; battery, BQ27220 gauge and head touch pads not read; no software shutdown | Experimental; contributor smoke test on USB power (boot, display, both codecs, touch, Wi-Fi, pairing, a hold-to-talk voice turn); full checklist not completed |
 | Elecrow CrowPanel Advanced 10.1-inch ESP32-P4 V1.1 | 1024×600 MIPI-DSI; GT911 touch; BOOT/TALK | PDM microphone; I²S speaker output | STC8 battery/charger status; uncalibrated | Experimental; [partial physical report](#crowpanel-advanced-p4-partial-physical-test-record): display/touch, normal speech submissions and speaker playback confirmed by the owner on an earlier build of the port, not this one; battery-only Wi-Fi startup issue remains unexplained; full checklist incomplete |
+| Waveshare ESP32-P4-WIFI6-Touch-LCD-7B (SKU 32510; ESP32-P4 rev v3.2) | 1024×600 EK79007 MIPI-DSI; GT911 detected; BOOT | ES8311 speaker and ES7210 microphone codecs initialized | P4/C6 ESP-Hosted; 32 MiB NOR and PSRAM | Experimental; [bring-up](#waveshare-p4-7b-initial-bring-up) and [camera/online smoke test](#waveshare-p4-7b-camera-and-online-smoke-test): boot, panel/codec initialization, online status and OV5647 RGB565 capture verified; in a combined test the separate gateway handler wrote a valid 640×512 PNG; touch input, actual mic/speaker, OTA and full checklist remain unverified; image quality not reviewed |
 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C (SKU 31523; ESP32-P4 rev v1.3) | JD9365 800×800 round MIPI-DSI; GT911 touch; BOOT | ES8311 speaker + ES7210 microphone | USB power only; no battery connector or telemetry | Experimental; [partial physical report](#waveshare-p4-touch-lcd-34c-partial-physical-report): display and C6-hosted Wi-Fi confirmed by the owner; touch, microphone capture, speaker playback, OTA and the full checklist not completed |
 | Xorigin AIPI Lite | ST7789 128×128; BOOT and power keys | One ES8311 for speaker and microphone | GPIO 10 power latch and power-off; battery level and charging not reported | Experimental; contributor smoke test on an earlier revision (boot, display and audio start, online pairing); microphone capture, colors, USB console and battery not verified on this revision |
 | Spotpear ESP32-S3-1.28-BOX (SKU `sp-esp32-s3-1.28-box`) | GC9A01 240×240 round; CST816D touch on its own I2C bus, BOOT | One ES8311 for speaker and microphone | GPIO 3 battery latch and power-off; battery voltage on GPIO 1 (divider ratio 2, not measured) and charging on GPIO 41, active high | Experimental; firmware builds; not run on a board; full checklist not completed |
 | Spotpear ESP32-S3-1.54 muma (touch version, SKU `sp-esp32-s3-1.54-muma`; ESP32-S3 rev v0.2; PCB revision not marked) | ST7789 240×240; CST816D touch on its own I2C bus, BOOT | One ES8311 for speaker and microphone | GPIO 3 battery latch and power-off; battery voltage (divider by two, inferred from upstream, not metered) and active-high charging signal; external power from the charging signal or a USB host; idle CPU at 80 MHz and light sleep while dozing on battery | Experimental; owner smoke test on two units on USB power (boot, display, touch, phone Wi-Fi setup, pairing, voice turns, agent-driven volume and brightness); battery readings on one unit: on USB `diag` showed 3418 mV, charging and external power; on battery the latch held and the Power page showed 3512 mV and Not charging; colors, touch coordinates, power-off, external power on battery and OTA not verified; full checklist not completed |
+| Espressif ESP32-S3-BOX | ST7789 320×240, BGR, both axes mirrored; TT21100 touch and BOOT. Mute on GPIO 1 is left to the hardware circuit | ES7210 microphones (MIC1 and MIC2) and ES8311 onboard speaker | USB power; screen timeout. ICM-42607-P unused | Experimental; firmware builds; not run on a board; full checklist not completed |
+| Espressif ESP32-S3-Korvo-2 with LCD sub-board (V3.0 or V3.1 main board, ESP32-S3-Korvo-2-LCD V1.0) | ILI9341 320×240, BGR, both axes mirrored, stock initialization; GT911 or TT21100 touch, X mirrored. ADC buttons unused | ES7210 microphones (MIC1 and MIC2) and ES8311 onboard speaker | TCA9554 enable, reset and backlight; battery voltage on GPIO 6 (divider of four, not measured); no charge pin and no software power-off. Camera, microSD and LEDs unused | Experimental; firmware builds; not run on a board; full checklist not completed |
+| LCDWIKI ES3C28P (spec sheet CR2025-MI6872 V1.0; ESP32-S3 rev v0.2, 16 MB flash, 8 MB octal PSRAM; PCB revision not checked) | ILI9341V 240×320 IPS in portrait, X mirrored, BGR, inversion on; FT6336G touch at 0x38 (FT5x06 driver) and BOOT | One ES8311 for the analog MEMS microphone and the speaker; amplifier enable GPIO 1 active low, held on as a power rail; microphone gain 42 dB (at 24 dB speech peaked near −40 dBFS over a −78 dBFS floor) | Battery voltage on GPIO 9 (divider of two, from upstream, not metered); no charge pin and no software power-off. microSD, RGB LED and extension pins unused | Experimental; [physical report](#lcdwiki-es3c28p-physical-report) on one unit, from a local build of this profile with an extra display overlay and 4 MB OTA slots: display, touch, BOOT, voice turns, phone Wi-Fi setup, Wi-Fi recovery, battery operation, OTA and rollback, and a two-hour session; the battery percentage and an unapproved device's actions are not verified |
 | Espressif ESP32-S3-BOX-3 | ST7789/TT21100 or ILI9342/GT911, detected through I2C; BOOT and touch gestures | ES7210 microphones and ES8311 onboard speaker | USB power; screen timeout | Experimental; physical report not recorded for either panel revision |
-| M5Stack CoreS3 (K128) | ILI9342C/E 320×240, detected through touch firmware; FT6336 gestures | ES7210 microphones and AW88298 speaker | AXP2101 readings, backlight and local power-off; AW9523 reset/boost control | Experimental; physical report not recorded for either panel revision |
+| M5Stack CoreS3 (K128) | ILI9342C/E 320×240, detected through touch firmware; FT6336 gestures | ES7210 microphones and AW88298 speaker; **GC0308 camera** via the `camera.capture` action and a [camera mode check](#m5stack-cores3-camera-mode-check) | AXP2101 readings, backlight and local power-off; AW9523 reset/boost control | Experimental; [speaker volume check](#m5stack-cores3-speaker-volume-check), [camera capture check](#m5stack-cores3-camera-capture-check) and [camera mode check](#m5stack-cores3-camera-mode-check) on an ILI9342C unit; physical report not recorded for either panel revision |
+| M5Stack StickS3 (ESP32-S3-PICO-1-N8R8) | ST7789P3 240×135 landscape; KEY1 (TALK) and KEY2 (CANCEL) | One ES8311 for speaker and microphone; AW8737 amplifier enabled through the M5PM1 | M5PM1 LCD rail and amplifier switching; battery voltage (percent from the uncalibrated voltage curve), USB presence, active-low charge status and PM1 shutdown; BMI270 face-down sleep | Experimental; owner smoke test on one unit on USB power with commit `db847c8` (ESP-IDF 6.1): `diag` lists display st7789, microphone es8311, speaker es8311 and I2C devices 0x18, 0x68, 0x6e; display upright with correct colors and no edge stripe; Wi-Fi setup; voice turns through a Hermes gateway (microphone capture and spoken replies); KEY2 cancels a reply. With the battery and motion build on the same unit, on USB: `status` reported 3572 mV, charging and external power; the BMI270 loaded its image and read screen up z +1004, picture upright y +973, right edge up x +1013 and face down z -998 mg, so the axes need no remapping; with `face_down_sleep on`, lying face down reported `face_down` and darkened the screen. Off USB, the owner reports the Battery and power page working on battery power (not charging), and settings **Power off** shutting the device down. On battery, after either settings **Power off** or a double click on the power button, a single click on the power button powered the device back on. Re-checked after rebasing onto `main`, with commit `4358b3d`: `diag` parts, I2C and motion as above, 4134 mV charging on USB, voice turns, KEY2 cancelling a reply, and face-down sleep. Replies in Chinese do not show, as on every board: the font and the reply charset are Latin-1. The device was admitted by the gateway's allow settings, so the pairing-code flow, screen timeout and OTA are not verified; full checklist not completed |
 | LilyGO T-Display-S3 (SKU/Version H587; PCB revision 1.2) | ST7789 320×170 over 8-bit i80; BOOT and Button2 | No onboard audio | Battery divider; no fuel gauge; GPIO15 powers the panel rail, not device shutdown | Experimental; physical smoke check only (screen ready/replies, Wi-Fi, online pairing); full physical checklist not completed; hardware-verified status not claimed |
 | Elecrow CrowPanel 2.1-inch HMI (ESP32-S3R8, 16 MB flash) | ST7701 480×480 RGB round panel; CST-family touch, rotary encoder, encoder button on PCF8574 | No onboard audio | USB power; screen timeout | Experimental; physical smoke check only (panel bring-up, brightness scale, Wi-Fi, online pairing, serial console); touch coordinates and encoder direction not physically verified |
 | Elecrow CrowPanel 5.0-inch HMI (DIS07050H, ESP32-S3R8, 4 MB flash) | ILI6122/ILI5960 800×480 RGB panel; GT911 touch on I2C, INT not wired (polled) | No onboard audio | USB power; screen timeout | Experimental; boot smoke check only (panel initialization log, GT911 ID, Wi-Fi, online pairing); rendering, colours, brightness and touch coordinates not physically verified |
@@ -37,6 +47,25 @@ The LCD-1.54 `-EN` SKU uses the same hardware. The separate Touch-LCD-1.54 model
 A [partial LCD-1.54 physical report](#waveshare-lcd-154-partial-physical-report) covers the Touch-LCD-1.54 SKU 33869 running the LCD-1.54 profile. It does not verify the separate non-touch SKUs.
 
 CI builds and packages every profile: the PlatformIO profiles with PlatformIO, and the CrowPanel P4 with ESP-IDF 6.1.0 in a separate job. Releases include the CrowPanel P4 image from the next tagged release on; its bootloader sits at 0x2000, as the ESP32-P4 requires, so the merged image is still flashed at 0x0. The browser installer lists profiles included in the latest published release, so newly merged profiles may require a source build until the next release. Other chips, wiring, and unlisted hardware revisions are porting targets, not verified configurations.
+
+The `ws-p4-touch-lcd-7b` profile is built and release-packaged by the dedicated ESP-IDF 6.1.0 P4 job.
+
+## Waveshare P4 7B initial bring-up
+
+- **Board / revision:** Waveshare ESP32-P4-WIFI6-Touch-LCD-7B, SKU 32510; live probe identified ESP32-P4 rev v3.2, 32 MiB NOR flash, and firmware detected 32 MiB PSRAM.
+- **Firmware:** Hermes Gadget 0.3.0 candidate built with ESP-IDF 6.1.0 for `ws-p4-touch-lcd-7b`; app image SHA-256 `c94ca7c104d57fd3c11d34d15a1dcffec1a4307119e53f19a23593c3b9ef9142`.
+- **Boot smoke test:** serial logs confirmed C6 ESP-Hosted initialization, EK79007 1024×600 DSI initialization, GT911 detection at 0x5D, ES8311 and ES7210 codec-handle initialization, and the gadget reaching “device ready”. A later candidate corrected the upside-down panel with a software 180° X/Y framebuffer transform; the owner confirmed the image was upright.
+- **Not verified at initial bring-up:** touch input/coordinates, microphone capture, audible speaker output, Wi-Fi association, gateway pairing, OTA and the full physical checklist. The separate C6 firmware was not reflashed.
+
+## Waveshare P4 7B camera and online smoke test
+
+- **Hardware:** Waveshare ESP32-P4-WIFI6-Touch-LCD-7B, SKU 32510, with an OV5647 module attached (owner-confirmed).
+- **Firmware candidate:** `91a9cec-ws7bcam2`, built with ESP-IDF 6.1.0; app image SHA-256 `864b369b7b03b25cd423e444c7bf83a9d1f64b9b1f696aa67698b31c7f949862`, 1,819,600 bytes. This was a development candidate, not a published release.
+- **Clean PR source build:** the upstream-based board branch built successfully with ESP-IDF 6.1.0. `hermes_gadget.bin` is 1,885,424 bytes (SHA-256 `46d19d29650319cb398daf0bee3a3cb705da32519e703dbabb13f37da7e39fd4`); the smallest OTA app partition is 1,984 KiB with 7% free. This clean build was not reflashed; the live hardware results below refer to the candidate above.
+- **Flash scope:** app partition only at `0x20000`; bootloader, partition table and NVS were not written.
+- **Online state:** settled device status reported `phase=online`, `screen=ready`, and `network=True`; the gateway listed the device online.
+- **Camera:** two device `camera.capture` calls returned bounded RGB565 results. In the integrated development test, the plugin's saver saved the latest result as a valid 640×512 PNG, 238,434 bytes, under lowercase `~/.hermes/gadgetpix/`. File mode was `0600` and PNG chunk CRCs passed. Image content and quality were not visually reviewed.
+- **Still unverified:** touch input/coordinates, actual microphone capture, audible speaker output, OTA, Wi-Fi loss/recovery and the full physical checklist.
 
 ## Waveshare LCD-1.54 partial physical report
 
@@ -164,6 +193,46 @@ Both fixes are in `main`. The port stays experimental: the PCB revision is not m
 
 After this report, review disabled light sleep for this board. Its FT3168 interrupt is not configured as a CPU wake source, so a report can expire while the CPU sleeps. Light sleep needs GPIO wake support and a physical battery wake test before it can be enabled. Review also made display initialization fail when margin clearing fails or times out, so drawing cannot overwrite a pending DMA transfer. These follow-ups were not tested on the physical board. The port stays experimental.
 
+## Waveshare AMOLED-2.06 light sleep report
+
+- **Board:** a Waveshare ESP32-S3-Touch-AMOLED-2.06 in its watch case, on its own cell. The PCB revision was not recorded.
+- **Firmware:** branch `light-sleep-206` on `BrOrlandi/hermes-gadget-sdk`, at [`1134c76`](https://github.com/BrOrlandi/hermes-gadget-sdk/commit/1134c76), the commit this change was rebased from, built with ESP-IDF 6.1.0 through PlatformIO. Fixes from review came after it and were not run on the watch: the CYD build guard, re-arming the wake when `touch_wake` changes during a doze, and keeping the touch INT on its edge interrupt while a Wi-Fi join attempt holds the chip awake during a doze.
+- **Waking:** with the screen dark on battery, a tap on the screen, BOOT and a short PWR press each lit it.
+- **Sleep share:** about 75% of the doze time was spent in light sleep. The remaining wake-ups, about 14 a second, came from Wi-Fi beacons under the `MIN_MODEM` power save.
+- **Use:** the owner wore it for several days with this firmware. Recordings, replies and the connection to Hermes behaved as before; light sleep only runs while the screen is dark, on battery and idle.
+- **Not measured:** battery life before and after the change. The [battery report](#waveshare-amoled-206-battery-report) measures it after the change only.
+
+## Waveshare AMOLED-2.06 battery report
+
+- **Board:** a Waveshare ESP32-S3-Touch-AMOLED-2.06 in its watch case. The PCB revision was not recorded. Cell capacity: not measured; Waveshare recommends 400 mAh.
+- **Firmware:** local branch `dev-206-next` at `ee57539` (`main` at `8926811` plus local commits), with light sleep and Wi-Fi power save `WIFI_PS_MIN_MODEM`; the AXP2101 gauge gave the percentage.
+- **Log:** `battery_log` on the Hermes host, a row every 30 s with no gaps (the longest step was 37 s).
+- **Discharge:** unplugged at full on 2026-11-02 at 03:49:16 (-03:00), 4126 mV on the first reading and 4155 mV half a minute later. The watch browned out at 12:03:02, at 3038 mV: 8 h 14 min. Light use, the screen dark most of the time, light sleep on, Wi-Fi power save `WIFI_PS_MIN_MODEM`. The load was light and steady, so the share of the time left stands for the charge left. `kAmoled206Points` in `firmware/drivers/battery_curve.hpp` comes from this run. Its 100% point is the first reading after unplugging, 4126 mV, so a full cell shows 100 right after unplugging.
+- **What the AXP2101 gauge showed over the run:** 25% with 42% of the time left, 15% (the low battery alert) with 2 h 14 min left, and 0% 11 minutes before shutdown, at 3209 mV.
+- **Replayed through the new curve** (host test, `firmware/tests/test_battery_curve.cpp`): within 2 points of the time left on average. It shows 100 right after unplugging and for the first 19 minutes, up to 4 points above the time left, then 43 with 42% left; it reaches 15 with 74 minutes left and 0 under two minutes before shutdown. A minute-long load dip at about 41% left reads 6 to 8 points low for the next 45 minutes, because the shown percent never rises on battery.
+- **Charge, from the brown-out:** plugged in at 12:19:29 at 3379 mV, the AXP2101 reported charge done at 13:09:49: 50 minutes. The voltage reached 4180 mV after 23 minutes, 45% of the charge time, and stayed there, so the voltage says nothing about the charge in the second half. The percent while charging stays the gauge's, which rose to 88 before charge done showed 100.
+- **Not measured:** a heavier load (screen on, long conversations) reads lower on the same curve; a second discharge to check the curve against a run it wasn't taken from.
+
+## Waveshare AMOLED-2.06 Wi-Fi max modem sleep report
+
+- **Board:** the same Waveshare ESP32-S3-Touch-AMOLED-2.06 as the light sleep report, on its own cell.
+- **Firmware:** `main` at [`a483c88`](https://github.com/Adolanium/hermes-gadget-sdk/commit/a483c88) with the first commit of this change for the switching check and the first discharge. `main` at [`5fbbc77`](https://github.com/Adolanium/hermes-gadget-sdk/commit/5fbbc77) with both commits (the `wifi_deep_sleep` setting included) for the setting checks and the later discharges. Both images carry a local commit that only logs the battery at the start and end of each doze. Built with ESP-IDF 6.1.0 through PlatformIO.
+- **Switching:** unplugged with the screen dark, the log showed `power save: max modem` 2.6 s after the doze began. Plugging back in 523 s later ended the doze and showed `min modem`, then `off` at the next 5 s battery check. That doze spent 77% of its time in light sleep, with 7,415 wake-ups (about 14 a second): no fewer wake-ups than under minimum modem sleep in the light sleep report.
+- **Setting:** `set wifi_deep_sleep maybe` is refused, `off` and `on` are accepted, and the value survives a reset. With it on, an overnight doze of 27,034 s stayed in `max modem` (75% light sleep, about 12 wake-ups a second); the low-battery alert lit the screen and gave `min modem`, the next doze `max modem`, and USB `off`. With it on and with it off, USB gave `off` at start-up. With it off, the two discharges below ran without a serial log (the board restarted when plugged back in, which clears the log), so that `off` never reaches `max modem` on the watch was not seen in a log; the setting read `off` before and after them, and host tests cover the rule.
+- **Connection:** online through every doze and discharge, with a battery reading every 30 s and no gap longer than 2 min until the cell ran out. A text turn worked on USB with the setting off. Voice and text turns during the first discharge worked as before; no turn was made on battery on the second image.
+- **Battery life:** each run starts from a full charge, unplugged with `battery_log` reading every 30 s, under light use with the screen mostly dark. The end is the last reading before the cell ran out.
+
+  | Image | `wifi_deep_sleep` | Unplugged | To 15% | To the end |
+  |---|---|---|---|---|
+  | older `dev-206-next` at `ee57539` (before the change) | (minimum only) | 4,126 mV | 5 h 59 min | 8 h 14 min (3,038 mV) |
+  | `a483c88` + first commit | (on) | 4,173 mV | 6 h 52 min | 9 h 19 min (3,047 mV) |
+  | `5fbbc77` + both commits | on | 4,130 mV | 6 h 32 min | not run down: plugged in at 15% |
+  | `5fbbc77` + both commits | off | 4,126 mV | 6 h 22 min | 9 h 00 min (2,992 mV) |
+  | `5fbbc77` + both commits | off | 4,131 mV | 6 h 29 min | 8 h 52 min (3,039 mV) |
+
+  On the same image, the run with the setting on reached 15% 3 to 10 min later than the two runs with it off, which is within the spread between the two runs with it off. These runs show no clear battery gain from maximum modem sleep on this board. The 1 h 05 min between the first two rows came mostly from other changes between those images. Use was not controlled between runs.
+- **Not measured:** the current draw in each mode.
+
 ## Waveshare AMOLED-2.16 physical smoke check
 
 - **Board / revision:** Waveshare ESP32-S3-Touch-AMOLED-2.16, SKU 33969. USB discovery reported ESP32-S3 chip revision v0.2, 16 MB flash and 8 MB octal PSRAM (gen-3 die, 80 MHz). PCB revision not established.
@@ -175,6 +244,81 @@ After this report, review disabled light sleep for this board. Its FT3168 interr
 - **Power:** `AXP2101 reporting ready`; charging and supply settings unchanged. USB power only; no battery was connected.
 - **Identity:** device ready with board tag `esp32s3-touch-amoled-2.16`, fw 0.2.0.
 - **Not verified in this smoke check:** Wi-Fi connection to a real gateway, pairing and persistence, microphone capture level, speaker playback, touch coordinate accuracy and orientation, the PWR key, battery operation, volume/brightness steps, OTA, and a long session. The touch orientation was changed during review to match Waveshare's BSP and has not been checked on the board. The port stays experimental until the full [checklist](#record-a-physical-test) is completed.
+
+## Waveshare AMOLED-2.16 partial physical report
+
+Second unit and a later firmware than the smoke check above. What changes with it: pairing, a real Wi-Fi join, a complete voice turn and device actions are now confirmed on this board; touch coordinates, the PWR key, OTA, persistence and battery still are not.
+
+- **Board / revision:** Waveshare ESP32-S3-Touch-AMOLED-2.16, SKU 33969, no battery fitted. `esptool flash-id` reported an ESP32-S3 (QFN56), chip revision v0.2, dual core plus LP core at 240 MHz, 16 MB flash (quad, 3.3 V) and 8 MB embedded PSRAM. PCB revision not marked on the unit.
+- **Firmware:** published release 0.5.0, image `hermes-gadget-esp32s3-touch-amoled-216-0.5.0.bin`. Its SHA-256 was compared with `SHA256SUMS` from the same release before writing. Flashed with esptool 5.4.0 at address `0x0` over the board's own USB Serial/JTAG port; `Hash of data verified`.
+- **Hermes version / host OS:** Hermes Agent v0.23.0 on Ubuntu, Gadget plugin installed from the v0.5.0 commit. The flashing host is a separate Linux machine; the board is not attached to the Hermes host by USB and reaches it over Wi-Fi only.
+- **USB install and recovery:** writing the full image works over USB. The board does not start the application after the write — it stays in the ROM download mode, with no USB log output and no DHCP attempt, until the cable is unplugged and plugged in again. Power-cycling is part of the install, not an optional step.
+- **Boot / display:** `CO5300 480x480` panel comes up; the Ready face and the pairing screen render upright and readable. `diag` reports 180 KB internal heap free and 5 026 492 of 8 388 608 bytes PSRAM free on a running, paired device.
+- **Codecs and bus:** `diag` lists `display co5300`, `microphone es7210`, `speaker es8311`, `touch true`, `rtc pcf85063`, `imu none`; I²C answered at `0x18`, `0x34`, `0x40`, `0x51`, `0x5a` and `0x6b`.
+- **Pairing:** the panel showed a pairing code, `hermes pairing approve gadget <code>` accepted it, and the device reported `ONLINE` and registered with board tag `esp32s3-touch-amoled-2.16` and fw 0.5.0. Persistence across a power cycle was not checked.
+- **Microphone / speaker / interruption:** one hold-to-talk turn in German completed end to end — the transcript arrived at the host with `echo_transcripts`, the answer appeared on the panel and was spoken through the speaker. At the default level the reply was too quiet for desk use; raising it through the device's own `speaker.volume` action (`{"percent": 100}`) fixed that. The actions this device advertises are `speaker.volume`, `screen.brightness`, `screen.language`, `timer.start`, `timer.cancel` and `timer.status`. The `playback ended:` line with the reply's underruns was not recorded. Cancelling a recording and interrupting a playing reply were not tested.
+- **Network:** joined the real 2.4 GHz network (WPA3-SAE, PMF capable) instead of the setup softAP. The first association landed on a mesh node at −78 to −80 dBm and never obtained an address: the station reported `joined true`, but `IP_EVENT_STA_GOT_IP` never fired, so the app stayed in `phase no_network` with `connection.network` reading `Wi-Fi lost (reason 8 assoc leave, rssi -78)` and `attempts 0`. The same unit and MAC obtained a lease immediately at the same host once it was moved next to a node with better coverage (−60 dBm on an earlier ESPHome build of this board). The cause of the failed lease is not known: the two attempts used different mesh nodes, the −60 dBm figure comes from other firmware, and the firmware, gateway, DHCP server, phone setup and USB setup were not varied.
+- **Power and battery:** no battery fitted. `diag` reports `battery_present false`, `external_power true` and `charge_current_ma 200`; other AXP2101 readings were not exercised.
+- **Failed or untested steps:** touch coordinates and orientation during normal use, the PWR key, brightness steps, identity and pairing persistence across a power cycle, network-loss recovery, cancel and interrupt, phone setup with a wrong password and its expiry, USB setup after phone setup closes, OTA into the other slot, rollback, battery operation and the two-hour session. The port stays **experimental** until the full [checklist](#record-a-physical-test) is completed.
+- **Sanitized diagnostics:** the `diag` lines quoted above are the parts, I²C, memory and power fields only. No network name, address, token or key is included.
+
+## Cardputer ADV port status
+
+The `cardputer-adv` profile targets M5Stack K132-Adv with Stamp-S3A
+(ESP32-S3FN8, 8 MB flash, no PSRAM). It stays **experimental** until the full
+physical checklist below is completed. A successful build or a host test does
+not verify display orientation, key wiring or analog audio quality.
+
+Implemented: ST7789 240x135 display and backlight; ES8311 microphone and speaker;
+TCA8418 keyboard; G0 push-to-talk; USB provisioning; calibrated battery voltage.
+The text editor sends through the unchanged Hermes Gadget protocol.
+
+Not implemented: SD storage, IR, BMI270 motion, battery percentage, charge-state
+telemetry or software shutdown. The mechanical power switch remains usable.
+Without PSRAM, voice streams live and is not retained through a lost connection.
+Keyboard entry is ASCII; the normal Gadget font can display Russian replies.
+
+The owner reports working keyboard/text entry, G0 voice requests/responses and
+Wi-Fi settings retained through an off/on cycle on the installed 0.5.0-based
+port. The owner also confirmed display readability/orientation/colors, text and
+voice requests on battery with USB disconnected, and successful requests after
+Fn+Z screen off/on. Battery endurance is untested. Network-loss recovery was
+skipped at the owner's request. A later test on the rebased port plus a
+Cardputer-only OTA receive-buffer fix verified app-only USB installation,
+OTA into the other slot and automatic rollback after a deliberately offline
+candidate's five-minute probation. Wi-Fi, identity and pairing survived; see
+[OTA and rollback report](hardware.md#ota-and-rollback-report). Full physical
+verification is still pending. The [review-build recheck](hardware.md#cardputer-adv-review-build-recheck)
+records a clean build with the shared platform, live boot/OTA confirmation,
+and owner-confirmed display, physical keyboard/text send and voice capture
+with a spoken reply on that exact build. A subsequent
+[receive-ownership follow-up](hardware.md#cardputer-adv-receive-ownership-follow-up)
+has software verification only; the device currently runs M5Launcher for
+separate experiments.
+Results and limitations are recorded in the
+[Cardputer ADV section](hardware.md#m5stack-cardputer-adv).
+
+## LCDWIKI ES3C28P physical report
+
+- **Board:** LCDWIKI ES3C28P (spec sheet CR2025-MI6872 V1.0); the PCB revision was not checked. ESP32-S3 (QFN56) revision v0.2; 16 MB flash; 8 MB octal PSRAM. A 3.7 V LiPo cell and a speaker on the board's two 1.25 mm jacks. Powered over USB from a Mac, and from the cell alone for the battery check.
+- **Firmware:** builds of [`mathbatistela/hermes-gadget-sdk`](https://github.com/mathbatistela/hermes-gadget-sdk) `main`, a fork based on this repository's `main` (`36c9165`) with this board profile and other local changes on top: an LVGL panel overlay, a screen rotation setting and a yes/no prompt for the plugin. Built with ESP-IDF 6.1.0 through PlatformIO and tested from 2026-11-07 to 2026-11-09. The board profile code is the same as in this branch. Because of the panel overlay those builds use `partitions-16mb.csv` (two 4 MB app slots); this branch's profile builds on its own with the default table, at 1642 KB in the 1984 KB `ota_0` slot.
+- **Hermes:** Hermes Agent v0.22.7 on Debian 12, over a plain WebSocket on the local network.
+- **USB install and recovery:** installed with `pio run -e lcdwiki-es3c28p -t upload` on the board's USB Serial/JTAG port; esptool verified every write. Wi-Fi, server and pairing survived each install.
+- **Pairing and persistence:** paired through the gateway. After a hardware reset over USB the device kept the same device ID and its pairing, and went back online by itself. A manual `reconnect` came back online and paired in under 0.2 s.
+- **Display, buttons and touch:** `ili9341 240x320 ready` at boot; the picture is upright in portrait with correct colors. Touch lands on the picture up to the edges and corners. Holding the screen or BOOT records; a swipe down cancels a recording and interrupts a playing reply.
+- **Microphone, speaker and interruption:** spoken questions at 30 to 50 cm were transcribed and answered with complete spoken replies; `playback ended: 0 underruns, 0 ms in total`; 0 recording frames lost. `set volume` and `set brightness` apply. The microphone gain is 42 dB: at the default 24 dB, speech peaked near −40 dBFS over a −78 dBFS floor.
+- **Diagnostics:** `hermes-gadget diag` lists `display ili9341`, `microphone es8311`, `speaker es8311`, `touch true`, `imu none`, `rtc none`; I²C answered at `0x18` (ES8311) and `0x38` (FT6336G). 104 KB internal heap and 5.5 MB PSRAM free on a running, paired device, with no connection closes over an hour of uptime.
+- **Network loss and recovery:** phone Wi-Fi setup joined the network. After a Wi-Fi loss the device reconnected to the network and to Hermes without a reset.
+- **Power and battery:** the board runs from the LiPo cell alone. On USB with the cell connected, GPIO 9 read 3962 mV (not metered). There is no charge pin and no software power-off, so neither is reported.
+- **OTA and rollback:**
+  - `hermes gadget update <device> firmware.bin` from the Hermes host sent a 1.9 MB image in 42 s to `ota_1`. The device restarted into it, logged `hg.ota: kept the new firmware` once it reached Hermes (online and paired within 4 s of boot), reported the new version to `hermes gadget devices`, and kept its settings and pairing.
+  - A second image, built with its WebSocket pointed at an unreachable address (a local test edit, reverted), booted from `ota_0` and never reached Hermes. At 300.9 s it logged `the new firmware didn't reach Hermes within 5 minutes; going back to the previous one`, rebooted into the previous firmware from `ota_1`, and was online and paired 3.8 s later with its settings.
+  - Both runs used the fork's 4 MB app slots, larger than the 1984 KB slots of this profile's release images.
+- **Two-hour session:** repeated voice turns over two hours, with no resets or audio failures.
+- **Not verified:** the battery percentage (`set battery_estimate liion`, the rough Li-ion voltage estimate; no measured curve), an unapproved device's actions, phone setup with a wrong password, its cancellation and its ten-minute expiry, and each step on this branch's own default-table build rather than the fork's.
+- **Sanitized diagnostics:** the fields quoted above only. No network name, address, token or key is included.
+
+The port stays experimental.
 
 ## Record a physical test
 
@@ -265,6 +409,151 @@ Failed or untested steps:
 ```
 
 Attach the report to a pull request that makes the two changes for that board and adds Bluetooth to its row in the table above. The board's next release then ships with the link. A report for one board doesn't turn it on for another.
+
+## Tailnet
+
+Reaching Hermes over a [Tailscale tailnet](tailnet.md) is off on every board. Turning it on adds TailTiny, a Tailscale client, to the image: about 114 KB of flash on the AMOLED-1.75C (measured with TailTiny 3.1.0: 1,628,976 → 1,745,296 bytes), four more tasks with 27 KB of internal-RAM stacks, and PSRAM while it syncs the tailnet's map. It needs a board with PSRAM. On the AMOLED-1.75C it doesn't fit beside [Bluetooth](#bluetooth): the two together leave 7% of the app slot free, under the 10% the build requires. So each board turns it on only after someone has checked it on that board.
+
+To try it on a board, build it yourself with two changes, then flash over USB:
+
+1. In `firmware/esp32/main/board.cpp`, set `b.tailnet = true;` in the board's section.
+2. Append these lines to `firmware/esp32/boards/<board>/sdkconfig.defaults`:
+
+   ```text
+   # Tailnet (docs/hardware-validation.md#tailnet).
+   CONFIG_HG_TAILNET=y
+   CONFIG_LWIP_MAX_SOCKETS=16
+   CONFIG_LWIP_SO_RCVBUF=y
+   # Internal RAM: the relay's always-open TLS buffers in PSRAM.
+   CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+   ```
+
+Delete the generated `firmware/esp32/sdkconfig.<board>` before building, or the configuration check stops the build. A board with the flag but without these lines logs `this board enables the tailnet, but the build has no CONFIG_HG_TAILNET` and runs without it.
+
+Check, with the Hermes host on the tailnet and its gadget plugin listening on its tailnet address:
+
+1. **Join:** `set ts_key <key>`, `set server ws://<host tailnet IP>:8765/<path>` and `set tailnet on`. The screen shows *Joining tailnet*, then *Reaching Hermes over the tailnet*, then the device connects. The log shows `hg.tailnet: up: 100.x.y.z as <name>`, and the device is listed in the Tailscale admin console.
+2. **Refusal:** with a used or revoked one-off key on a fresh device (after `factory-reset`), the screen shows *Tailnet: auth key rejected* and the device never connects.
+3. **Away from home:** on a phone hotspot, the device reaches Ready, a voice turn gets a spoken reply, and `diag` shows `tailnet.hermes.path` (`direct` or `relay`).
+4. **Wi-Fi changes:** moving between home Wi-Fi and the hotspot, the device reconnects through the tailnet without a restart.
+5. **Restart:** after a restart, the device rejoins without a new key.
+6. **OTA:** a `hermes gadget update` over the tailnet is kept (`hg.ota: kept the new firmware`).
+7. **Off:** `set tailnet off` restarts the device, which then connects directly as before.
+8. **Power:** on battery, idle for two hours each, with the tailnet on and off: compare the battery log. Record whether the screen-off doze still happens (`hg.power: awake after N s dozing`).
+9. **Long run:** an hour of normal use, with no resets and stable free memory (`diag`).
+
+Use this report format:
+
+```text
+Model / PCB revision:
+Firmware commit (with the two changes above):
+Tailnet (Tailscale or Headscale), key type and ACL:
+Image size and free memory, tailnet on and off:
+Join, refusal, restart:
+Hotspot: Ready, voice, path (direct / relay):
+Wi-Fi changes:
+OTA over the tailnet:
+Off:
+Battery, tailnet on and off (idle hours, doze):
+One-hour run:
+Failed or untested steps:
+```
+
+Attach the report to a pull request that makes the two changes for that board and adds the tailnet to its row in the table above. Release images include it only once a board has such a report and someone other than their author has reviewed the changes to TailTiny's encryption and TLS code (`firmware/esp32/components/TAILTINY.md`, changes 2 to 4).
+
+### AMOLED-1.75C with TailTiny 3.1.0
+
+A check of the TailTiny 3.1.0 update ([#283](https://github.com/Adolanium/hermes-gadget-sdk/pull/283)) on one board, not a full report in the format above.
+
+- **Board:** the Waveshare ESP32-S3-Touch-AMOLED-1.75C from the [physical report](#waveshare-amoled-175c-physical-report).
+- **Firmware:** `firmware/tailtiny-3.1.0` at `9354e8f` (its TailTiny files are unchanged at `e24a3dc`) with the two changes above, ESP-IDF 6.1 through PlatformIO; ELF SHA-256 `1240d65c7…`. The light-sleep share comes from a second image: the same build plus local counters of the time spent in doze and in light sleep, which `main` doesn't have (ELF `3c4332ee6…`). Its TailTiny files are identical.
+- **Network:** home Wi-Fi, Tailscale's control server and relays, a key already stored on the board.
+- **Boot and registration:** `Keys loaded from NVS` (no new key needed), the Noise handshake, and registration in 88 ms. Then `DERP handshake complete` with `CONFIG_ML_DERP_VERIFY_CERT=y` and no certificate refused, `hg.tailnet: up`, and `online (paired)` 24.6 s after boot. `diag`: `tailnet.hermes.path` `direct`.
+- **Voice turn (USB):** a 4.1 s recording with 0 frames lost. The reply played at 1.00x real time with one 16 ms underrun and 0 bytes dropped. Internal RAM low point 41.4 KB; TailTiny's task stacks had 2.0 to 3.5 KB free.
+- **Idle on battery:** with the screen dark, 16 minutes on the update's image with a battery reading every 30 s (the longest step was 35 s) and no reconnect or reset. On the image with counters, 15 minutes all in doze, 12.7% of it in light sleep (114.7 s of 901.5 s, 6,629 wake-ups). An earlier image with TailTiny 3.0.2 and the patches this update drops spent 0 s in light sleep over 90 minutes on a phone hotspot. The networks differ, so this compares only roughly.
+- **Not run on this image:** a relay path, the refusal, Wi-Fi changes, OTA over the tailnet, turning it off, the two-hour battery comparison and the one-hour run.
+
+## M5Stack CoreS3 speaker volume check
+
+Reported by @james-see in [#289](https://github.com/Adolanium/hermes-gadget-sdk/issues/289). A check of the speaker gain on one board, not a full report in the format above.
+
+- **Board:** M5Stack CoreS3 (K128), ILI9342C panel.
+- **Before:** release 0.5.0. Replies at volume 100 sounded about a fifth of full volume, and the timer tone was weak. Playback itself was healthy: a 6.1 s reply played at 1.00x real time with 0 underruns and 0 bytes dropped, over Wi-Fi at −58 dBm.
+- **After:** `main` built with ESP-IDF 6.1 (`espressif/idf:v6.1`) and the CoreS3 defaults, with the AW88298's `pa_gain` at 0, flashed with `esptool`. In a before-and-after hearing test, replies at 100 were properly loud, with no audible distortion or clipping over several replies, and the timer tone was louder in proportion. 20 and 100 were clearly apart. The device reconnected at once, kept its identity and pairing, and ran from `ota_0`.
+- **Not checked:** a measured level, the default volume of 70 on its own, the `playback ended:` line after the change, a long reply at full volume on battery, and the rest of the checklist.
+
+## M5Stack CoreS3 camera capture check
+
+A check of the GC0308 camera port on one board, not a full report in the format above.
+
+- **Board:** M5Stack CoreS3 (K128), ILI9342C panel.
+- **Firmware:** `main` with the camera port, built with ESP-IDF 6.1 (`espressif/idf:v6.1`) and the CoreS3 defaults, flashed with `esptool` over USB.
+- **Capture:** the gateway ran `camera.capture` and saved a 640×480 PNG (174,689 bytes) under `~/.hermes/gadgetpix/`. The image is upright, the colours are right (RGB byte order confirmed correct), and it is not mirrored: the frame shows a person at a desk, a shelf behind, and coloured LED lighting, matching the real scene.
+- **Timing and memory:** the first capture after boot includes sensor init (rail enable + CAM_RST release) and answered at about 15 s of uptime. Three captures in a row on this build finished 3.3 s apart end-to-end each (capture + transfer + PNG), every one upright with correct colours and no reset or wedge across the sequence. `diag` before the first capture reported 6,280,412 PSRAM bytes free, and 5,665,884 after the third — the running camera holds the 640×480 frame in PSRAM (the port had never released it, by design).
+- **During development:** the first init attempt panicked with an `IntegerDivideByZero` in `ll_cam_config` because `xclk_freq_hz` was left at 0 while the LCD_CAM divider needs the sensor's clock rate; setting it to 20 MHz fixed it.
+- **Camera rail found:** the ribbon (camera + proximity) shares a 3.3 V rail this port never switched on — with ALDO3/BLDO1/BLDO2 off, the diag scan missed 0x21 and 0x23 entirely and the GC0308 ID read returned garbage (`ESP_ERR_NOT_SUPPORTED`); an instrumented run logged `0x90=8b` before, then `id=0x9b` right after setting ALDO3 (`0x94` = `0x1C`) and OR-ing `0x34` into `0x90`, matching esp-bsp's CoreS3 camera bring-up. `camera_power()` now sets those rails before its first reset pulse.
+- **Not checked:** captures in low light against auto-exposure convergence, captures while a reply is playing, battery-powered capture, and the rest of the checklist.
+
+## M5Stack CoreS3 camera mode check
+
+The settings menu's **Camera** item — the live view, the countdown capture and
+leaving (#294, PR 1) — on the same ILI9342C unit as the
+[camera capture check](#m5stack-cores3-camera-capture-check). Run by the
+contributor with the serial console (entry, capture and leaving by hand).
+
+- **Firmware:** the `cores3-camera-mode` branch at commit `1bc96b7`, built with ESP-IDF 6.1
+  (`espressif/idf:v6.1`) and the CoreS3 defaults, flashed over USB into the
+  `ota_0` slot.
+- **Entry:** the settings menu's **Camera** item, reached by touch (hold the
+  title → drag to the item → tap) and with `camera` on the console; both open
+  the live view. Opening starts the pipeline — the rails, the CAM_RST pulse
+  and the driver — and the first frames flowed within about **270 ms** of the
+  command (probe and init logs at 21.497–21.777 s of uptime). A board whose
+  port has no camera, whose panel has no whole-panel framebuffer, or whose
+  start failed keeps the item out of the menu.
+- **Live view:** the VGA stream blitted straight into the panel rows between
+  the bars at the app's ~10 fps cap. Frame-timing counters measured 10.0
+  renders a second while the live view ran (`perf`'s renders; the preview's own
+  frames flush outside the Ui's counted bands, so they appear as idle renders).
+- **Mirroring:** the preview is **mirrored left-to-right** and the captured photo
+  is not: the live view moves the way the hand aimed at it moves, and the
+  capture — the held photo and the gateway's PNG — reads printed text the
+  right way round. Checked by aiming by hand and comparing the capture.
+- **Capture:** a tap starts the 3-2-1 countdown (a large number over the live
+  view) and captures. The photo, scaled and centred, holds until the next tap
+  (retake: the live view comes back first) or a swipe down. It is held in memory only:
+  a retake or leaving the mode discards it, and nothing is saved or sent. `diag`'s free
+  PSRAM: 6,280,372 bytes with the pipeline not running (boot idle — **the
+  boot pays nothing for the camera**), 5,051,408 while the live view ran, and
+  4,428,792 with the 614,400-byte photo held. Leaving returned to 6,280,388
+  and a later start to 5,051,396 — every intermediate allocation comes back.
+- **Leaving:** a swipe down exits at once; 60 s with no touch does too
+  (`camera mode left after 60 s with no touch` in the log). Closing the mode —
+  and, while the mode is closed, 60 s after the last `camera.capture` — stops the pipeline
+  (`camera pipeline stopped` in the log at 60 s after the capture, tick-timed):
+  the driver's frame buffers go back to PSRAM, the sensor is held in reset and
+  the ribbon's supplies go off. The screen never dimmed while the live view
+  ran.
+- **Start/stop cycles:** two open/close cycles and two `camera.capture` calls
+  spaced more than 60 s apart ran on this build: each start (mode open or
+  capture) reached the first frame in about 270 ms, and the later stop returned
+  the PSRAM to boot-idle (5,051,396 → 6,280,388 with the 60 s stop landed at
+  exactly the capture's stamp + 60 s).
+- **Residual:** the capture moment stalls the app task for about 100 ms (the
+  614 KB copy and the photo's blit), so a touch inside that window can drop a
+  sample or two. The preview never waits on the driver — every draw is gated on
+  `esp_camera_available_frames()`, since `esp_camera_fb_get` blocks up to 4 s on
+  an empty queue and starved the event queue (touch samples dropped, gestures
+  missed) until it was gated. The AXP2101 keeps its registers across the ESP32's
+  restarts, so rails left up by an interrupted stop stay up until the next
+  start's `camera_power(true)` refreshes them (masked writes, no harm).
+- **A driver finding:** switching the sensor to QVGA for the live view does not
+  work on this driver — `esp32-camera` queues only frames as large as its fb
+  allocation (`cam_hal: FB-SIZE: 153600 != 614400`, and no frame arrives), so
+  the mode runs the VGA pipeline and blits it scaled instead of restarting or
+  re-configuring frame sizes. The pipeline starts on demand and stops with the
+  mode (or, with the mode closed, 60 s after the last capture); `camera.capture`
+  reuses it as before.
 
 ## Support labels
 

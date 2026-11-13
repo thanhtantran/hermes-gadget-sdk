@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # A draft stays up for review. CI starts when the pull request is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +21,7 @@ jobs:
     # Every pull request adds a line to CHANGELOG.md's Unreleased section, or carries the
     # no-changelog label (internal refactors, test-only fixes, dependency bumps).
     # Dependabot's bumps are not user-facing; their PRs skip the check.
-    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -45,13 +47,14 @@ jobs:
 
   boards:
     name: Discover firmware boards
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       boards: ${{ steps.list.outputs.boards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.12"
       - id: list
@@ -66,6 +69,7 @@ jobs:
 
   core:
     name: Firmware core (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -83,6 +87,7 @@ jobs:
 
   python:
     name: ${{ matrix.name }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -94,7 +99,7 @@ jobs:
           - {python: "3.12", os: ubuntu-24.04-arm, name: "Linux ARM64"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -134,6 +139,7 @@ jobs:
 
   site:
     name: Installer site
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -162,6 +168,7 @@ jobs:
   esp32:
     name: ESP32 firmware (${{ matrix.board }})
     needs: boards
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -170,7 +177,7 @@ jobs:
         board: ${{ fromJSON(needs.boards.outputs.boards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.12"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
@@ -193,6 +200,7 @@ jobs:
           if-no-files-found: error
   esp32p4:
     name: ESP32-P4 firmware (ESP-IDF 6.1.0)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     container: espressif/idf:v6.1@sha256:f81b6e077e6af93c312181cd7d4e7936cfbafc5c7f77cbacba8fdd34994f218a
     timeout-minutes: 45
@@ -205,18 +213,26 @@ jobs:
           source /opt/esp/idf/export.sh
           idf.py -B build/crowpanel-p4-101 -D SDKCONFIG=build/crowpanel-p4-101/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/crowpanel-p4-101/sdkconfig.defaults" set-target esp32p4
           idf.py -B build/crowpanel-p4-101 -D SDKCONFIG=build/crowpanel-p4-101/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/crowpanel-p4-101/sdkconfig.defaults" build
+      - name: Build Waveshare P4 7B
+        shell: bash
+        working-directory: firmware/esp32
+        run: |
+          source /opt/esp/idf/export.sh
+          idf.py -B build/ws-p4-touch-lcd-7b -D SDKCONFIG=build/ws-p4-touch-lcd-7b/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/ws-p4-touch-lcd-7b/sdkconfig.defaults" set-target esp32p4
+          idf.py -B build/ws-p4-touch-lcd-7b -D SDKCONFIG=build/ws-p4-touch-lcd-7b/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/ws-p4-touch-lcd-7b/sdkconfig.defaults" build
       - name: Package
-        # The same image, app and manifest a release ships, so a contributor can flash a CI build.
+        # The same images and manifests a release ships, so a contributor can flash CI builds.
         shell: bash
         working-directory: firmware/esp32
         run: |
           source /opt/esp/idf/export.sh
           python tools/stage_idf_build.py crowpanel-p4-101 build/crowpanel-p4-101
-          python tools/package_release.py --board crowpanel-p4-101 --out dist
+          python tools/stage_idf_build.py ws-p4-touch-lcd-7b build/ws-p4-touch-lcd-7b
+          python tools/package_release.py --board crowpanel-p4-101 --board ws-p4-touch-lcd-7b --out dist
       - name: Keep the images
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
-          name: firmware-crowpanel-p4-101
+          name: firmware-esp32p4
           path: firmware/esp32/dist/
           if-no-files-found: error
       - name: Build Waveshare P4 Touch-LCD-3.4C

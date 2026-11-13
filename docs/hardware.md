@@ -12,6 +12,22 @@ Start with [Supported hardware](supported-hardware.md) for a board comparison, t
 - **Speaker (optional):** an I2S class-D amplifier (MAX98357A) and a 4–8 Ω speaker.
 - **Buttons:** at least one (TALK). The DevKit's BOOT button works; a second button for CANCEL is recommended.
 
+## Back up the factory firmware
+
+Most board sections below give an `esptool.py ... read_flash` line that saves the board's factory firmware before its first flash. PlatformIO's own esptool is not on the shell path, so with PlatformIO as the only install, run the line through it with the same arguments:
+
+```bash
+pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 read_flash 0 0x1000000 my-board-factory.bin
+```
+
+Or install esptool with `pip install esptool` and run the lines as written. esptool 5 warns that `esptool.py` and `read_flash` are older names, and runs them. The Cardputer ADV line is written for esptool 5 (`esptool ... read-flash`); through PlatformIO's esptool 4, write it as `pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port /dev/ttyACM0 read_flash 0 ALL original-cardputer-adv.bin`.
+
+The default speed is slow: on an ES3C28P's USB port a 16 MB read took 24 minutes. Adding `-b 921600` before `read_flash` made it about seven times faster.
+
+Before flashing, check that a full-flash backup has the board's full flash size: 16,777,216 bytes for `0x1000000` (16 MB), 8,388,608 bytes for `0x800000` (8 MB), and for `ALL` the size esptool reports for the detected flash. `ls -l` shows it. A shorter file is not a backup; read the flash again. A line that reads one partition instead (the AIPI Lite's `read_flash 0x9000 16384`) gives a file of exactly that length.
+
+Keep backups private. A factory image can hold the vendor's service credentials (the AIPI Lite's does), and an image read after setup holds your Wi-Fi password and the device's key. Save them in a folder only you can read, and don't commit, upload or share them.
+
 ## ESP32-S3 breadboard
 
 Board option `esp32s3-breadboard`, for an ESP32-S3-DevKitC-1 N8R8 and the modules above.
@@ -87,6 +103,54 @@ The USB-C port is the S3's own USB Serial/JTAG, so flashing and the serial conso
 4. **Speaker:** replies are clear and loud enough (`set volume 80`); no hiss between replies.
 5. **Buttons:** BOOT holds to talk, PLUS cancels, and holding PLUS for 2 s starts a new conversation.
 
+## Waveshare ESP32-S3-Touch-LCD-1.83
+
+Board option `waveshare-touch-lcd-183`, for the Waveshare ESP32-S3-Touch-LCD-1.83 (SKUs 32790 and 32791; the `-EN` SKU is the same hardware): an ESP32-S3R8 with 16 MB flash and 8 MB octal PSRAM, a 1.83" 240×284 ST7789P panel over SPI, a CST816D touchscreen, an ES8311 speaker codec, an ES7210 microphone ADC, an AXP2101 power manager, a QMI8658 IMU, a PCF85063 RTC and a TF card slot. This port is experimental. It has not been run on a board.
+
+**Back up the whole flash before the first flash.** The board has no other copy of its factory firmware:
+
+```bash
+esptool.py --chip esp32s3 read_flash 0 0x1000000 touch-lcd-183-factory.bin
+```
+
+Writing that file back at `0x0` restores the original firmware.
+
+| Part | Chip | Connection |
+|---|---|---|
+| Display | ST7789P, SPI | MOSI 7, SCLK 6, CS 5, DC 4, RST 38; 24 MHz, SPI mode 0; colors inverted; offsets 0; backlight GPIO 40, active high |
+| Speaker DAC | ES8311 | I2C 0x18 on SDA 15, SCL 14; I2S MCLK 16, BCLK 9, WS 45, DOUT 8, DIN 10; amplifier enable 46 |
+| Microphone ADC | ES7210 | I2C 0x40 on the same bus; MIC1 and MIC2, standard I2S. The echo-reference channel is not used |
+| Touch | CST816D | I2C 0x15 on the same bus; RST 39, INT 13 (the driver polls) |
+| Power | AXP2101 | I2C 0x34. ALDO1 at 3.3 V supplies the microphone. PWR is the PMIC power key |
+| Keys | | BOOT GPIO 0 (TALK) |
+
+Hold the screen or BOOT to talk, tap to answer yes, and swipe down to cancel. A short press on PWR turns the screen off and on. The profile reads that press from the AXP2101, the same way the 2.06 watch does. One published pin list names GPIO 41 as a power button and never uses it; this profile does not read GPIO 41. If PWR does nothing on a unit, that pin is the first thing to check.
+
+The AXP2101 reports battery voltage, charging and external power. There is no measured discharge curve for this cell, so a percentage is the chip's own gauge or the uncalibrated linear fallback, not a fitted curve. Do not treat it as a state of charge. The QMI8658, the PCF85063 and the TF card are present and unused. Light sleep is off.
+
+The glass is 240×284. To preview that layout, run `hermes-gadget sim --board sim-240x284`. A stripe along an edge means `lcd.gap_x` or `lcd.gap_y` is wrong; both are 0 until a unit says otherwise.
+
+**Build and flash it** with PlatformIO:
+
+```bash
+cd firmware/esp32
+pio run -e waveshare-touch-lcd-183 -t upload -t monitor
+```
+
+Or with `idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/waveshare-esp32-s3-touch-lcd-1.83/sdkconfig.defaults" build`. The USB-C port is the S3's own USB Serial/JTAG, so flashing and the serial console (115200 baud) both use it.
+
+### First flash: what to check
+
+1. **Boot log:** `ST7789 240x284 ready` and `codecs: speaker ready, microphones ready`. `hermes-gadget diag` should list `display st7789`, `microphone es7210`, `speaker es8311`, and I2C devices `0x18`, `0x40`, `0x15` and `0x34`.
+2. **Screen:** the mascot is upright and not mirrored, and the colors are right (amber accents, not blue). A negative image means `lcd.invert` is wrong. A blank panel is a candidate for SPI mode 3. One pin list names mode 3, and the board file that starts this panel sets mode 0, which is what the firmware uses.
+3. **Brightness:** the settings menu's brightness steps dim the screen, and 100 percent is the brightest. Reversed steps mean `lcd.backlight_invert` is wrong.
+4. **Touch:** holding the screen records, a swipe down cancels, and taps land where you touch.
+5. **Microphone:** hold BOOT and speak; the waves move with your voice. Silence with the ES8311 present points at ALDO1, which this profile turns on for the microphone.
+6. **Speaker:** replies are clear and loud enough (`set volume 80`).
+7. **Power:** `status` shows `battery_mv`, charging and external power on USB. A percentage, if one appears, is not calibrated. A short PWR press turns the screen off and on.
+
+Pin numbers follow Waveshare's `esp32_s3_touch_lcd_1_83` board support package at commit `7945883d`. Panel size, color inversion, the 24 MHz clock, touch reset and the AXP2101 microphone rail follow xiaozhi-esp32's `waveshare/esp32-s3-touch-lcd-1.83` board at commit `49b4380b` (tag v2.5.2). See [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
+
 ## Waveshare ESP32-S3-Touch-LCD-1.85C V2
 
 Use `esp32s3-touch-lcd-185c-v2` for the V2 board, PCB Rev2.0: an ESP32-S3R8 with 16 MB flash and 8 MB octal PSRAM, a round 360×360 ST77916 LCD over QSPI, CST816 touch, an ES8311 DAC, an ES7210 microphone ADC with two microphones and an NS4150B amplifier. A V2 board says Rev2.0 on the PCB or has a V2 sticker on the case. V1 has different audio hardware and must not use this image. The standard SKU needs a speaker on the SPK connector; the speaker-box version includes one. This port is experimental; see the [partial physical report](hardware-validation.md#waveshare-185c-v2-partial-physical-report).
@@ -123,6 +187,47 @@ Record the results with the [hardware checklist](hardware-validation.md#record-a
 
 References: [Waveshare V2 documentation](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.85C), [V2 schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.85C/ESP32-S3-Touch-LCD-1.85C_V2.pdf) and the [factory demo at 8ead4a96](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/tree/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880). The demo numbers the expander pins from one (EXIO1 is P0). The LCD initialization tables and their licenses are listed in [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
 
+## Waveshare ESP32-S3-Touch-LCD-1.46
+
+Use `esp32-s3-touch-lcd-146` for the Waveshare ESP32-S3-Touch-LCD-1.46. The same pin table on the wiki covers the 1.46B and the 1.46C. The module is an ESP32-S3R8 with 16 MB flash and 8 MB stacked PSRAM, a round 412×412 SPD2010 LCD over QSPI, SPD2010 touch, an I2S microphone and a PCM5101 speaker. This port is experimental. It was built and not run on a board.
+
+Octal PSRAM at 80 MHz follows the S3R8 pairing used on the other S3R8 boards in this tree. The wiki does not print a flash part order code.
+
+| Part | Connection |
+|---|---|
+| SPD2010 LCD, QSPI | CS 21, clock 40, D0 to D3 46, 45, 42, 41, backlight 5, active high. Reset is TCA9554 EXIO2. TE on GPIO 18 is unused |
+| SPD2010 touch | I2C 0x53, INT GPIO 4, reset TCA9554 EXIO1 |
+| TCA9554 expander | I2C 0x20. The firmware pulses bits 0 and 1 and leaves the other bits alone |
+| I2C | SDA 11, SCL 10, 400 kHz. The touch device itself runs at 100 kHz |
+| Microphone | I2S SCK 15, WS 2, SD 39. MSM261S4030H0R, right slot |
+| PCM5101 speaker | BCLK 48, LRCK 38, DIN 47. No MCLK pin and no amplifier-enable pin |
+| BOOT | GPIO 0, TALK. The wiki names the button and does not print this GPIO |
+
+**Audio.** The speaker path is the existing I2S speaker, 16-bit Philips, on I2S0. The microphone is an MSM261S4030H0R on I2S1. The schematic names it U6. Pin 5 (L/R) is net MIC_LRCK_U, and that net is tied to 3V3, so the reader takes the right 32-bit slot. The sample is still 24 bits inside that slot. This has not been heard on a board.
+
+QSPI runs at 20 MHz in SPI mode 3. Espressif's QSPI example macro uses that clock. The factory ESP-IDF header sets mode 0 and 80 MHz, which this driver does not follow. Color order is RGB. Color inversion, axis swap and both mirrors stay off, matching that example. The width 412 is a multiple of 4, which the SPD2010 driver requires. About 282 pixels per inch, from the 412 pixel diameter divided by 1.46 inches. Touch INT is sampled once after the falling-edge handler is installed. The SPD2010 holds that line low until a read sends its CPU-start command and clears INT. A failed read is tried again on the next poll while the line stays low.
+
+Hold the screen or BOOT to talk, tap to answer yes, and swipe down to cancel. The QMI8658, the PCF85063, the TF card, the battery header, the volume knob and the PWR button stay off. The wiki does not give GPIO numbers for the knob, the battery sense or PWR. TF card chip select is EXIO3. RTC interrupt is GPIO 9. IMU interrupts are EXIO4 and EXIO5.
+
+```bash
+cd firmware/esp32
+pio run -e esp32-s3-touch-lcd-146 -t upload -t monitor
+```
+
+For ESP-IDF, use `SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/esp32-s3-touch-lcd-146/sdkconfig.defaults"` with a separate build directory and sdkconfig. The USB-C port handles flashing and the serial console at 115200 baud. There is no simulator profile at 412×412.
+
+### First flash: what to check
+
+1. **Boot log:** `expander resets 0x03 ready`, `spd2010 412x412 ready`, `microphone ready (i2s)`, `speaker ready` and `touch ready`. In `hermes-gadget diag`, the `i2c` list includes `0x20` and `0x53`. Other chips on the bus may answer too.
+2. **Screen:** the mascot is centred and upright, the whole circle is visible, and the accents are amber, not blue. Brightness and screen timeout work.
+3. **Touch:** holding the centre and each edge starts a recording. A tap answers yes and a swipe down cancels.
+4. **Microphone:** the waves move with your voice and Hermes's transcript is right. The right slot comes from the schematic and has not been heard on a board.
+5. **Speaker:** replies are clear. Cancelling a reply stops it at once.
+
+Record the results with the [hardware checklist](hardware-validation.md#record-a-physical-test).
+
+References: [Waveshare documentation](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.46), the [schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.46/ESP32-S3-Touch-LCD-1.46.pdf) and the [factory demo at fda89ff](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.46/tree/fda89ff2ff32eb1bce561901225c6a36fa684237). The demo repository has no license. Pin numbers come from the wiki. The microphone part and the L/R tie to 3V3 come from the schematic. The expander address, the EXIO bit map and the backlight on-level come from the demo. Display and touch drivers are Espressif components. See [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
+
 ## Waveshare ESP32-S3-Knob-Touch-LCD-1.8
 
 Use `esp32s3-knob-touch-lcd-1.8` for the knob board: an ESP32-S3R8 with 16 MB flash and 8 MB octal PSRAM, a round 360×360 SH8601 LCD over QSPI (not the ST77916 of the 1.85C V2), CST816S touch, one PDM microphone, a rotary encoder around the screen, a DRV2605 haptic driver and a Li-ion battery with charging management.
@@ -155,9 +260,110 @@ References: [Waveshare wiki](https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-
 - The encoder scrolls the reply list; each detent is one step.
 - The microphone captures on a hold: check the VU feedback on screen, and that released audio is recognized.
 
+## ESP32-S3-BOX
+
+Use `esp32-s3-box` for the original Espressif ESP32-S3-BOX: 16 MB flash and 8 MB octal PSRAM. BOX-3 and BOX-Lite use other profiles. This port is experimental, with no physical report recorded.
+
+| Part | Connection |
+|---|---|
+| ST7789 320×240 | SPI MOSI 6, clock 7, CS 5, DC 4, reset 48 (active low, shared with touch), backlight 45 |
+| TT21100 touch | I2C 0x24, interrupt 3. The touch driver mirrors X. |
+| I2C | SDA 8, SCL 18, 400 kHz |
+| ES8311 speaker / ES7210 microphones | MCLK 2, BCLK 17, WS 47, DOUT 15, DIN 16; amplifier enable 46 |
+| BOOT | GPIO 0, TALK |
+
+The glass is a 2.4 inch ST7789. Color order is BGR, both axes are mirrored, and color inversion stays off. Reset on GPIO 48 is active low. The display reset runs before touch starts, and touch does not pulse that line again. Backlight is GPIO 45. I2S word select is GPIO 47.
+
+Hold the screen or BOOT to talk, swipe down to cancel, and hold the title for one second to open settings. GPIO 1 is the hardware mute button and is left to that circuit. The touch controller's home button is unused. The ICM-42607-P, the PMOD headers and storage stay off.
+
+```bash
+cd firmware/esp32
+pio run -e esp32-s3-box -t upload -t monitor
+```
+
+The USB-C port handles flashing and the serial console. For ESP-IDF, use `SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/esp32-s3-box/sdkconfig.defaults"` with a separate build directory and sdkconfig. Phone setup, pairing and OTA use the same flows as the other ESP32 boards.
+
+Back up the factory image before the first flash:
+
+```bash
+esptool.py --chip esp32s3 read_flash 0 0x1000000 esp32-s3-box-factory.bin
+```
+
+On a good boot the panel logs `st7789 320x240 ready`. Run the [hardware checklist](hardware-validation.md) for touch alignment, colors, audio, the physical mute button, USB recovery and Wi-Fi setup. No battery readings are advertised.
+
+References: Espressif's [ESP-BOX BSP](https://github.com/espressif/esp-bsp/tree/67f41a169401d1f23e827188dd08fb351cb0febe/bsp/esp-box) at commit `67f41a169401d1f23e827188dd08fb351cb0febe` (Apache 2.0). Pin numbers, the ST7789 mirror, BGR color order and the TT21100 mirror come from that package. The source of those facts is listed in [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
+
+## ESP32-S3-Korvo-2
+
+Use `esp32-s3-korvo-2` for the Espressif ESP32-S3-Korvo-2 with the LCD sub-board (ESP32-S3-Korvo-2-LCD V1.0 on a V3.0 or V3.1 main board): 16 MB flash and 8 MB octal PSRAM. This port is experimental, with no physical report recorded. A main board without that LCD sub-board has no panel.
+
+| Part | Connection |
+|---|---|
+| ILI9341 320×240 | SPI MOSI 0, clock 1, DC 2. Chip select is not an ESP32 pin. Reset, backlight and the LCD/touch enable are on the TCA9554 |
+| TCA9554 | I2C 0x38 (TCA9554A) or 0x20. Pin 3 held low enables the LCD and touch. Pin 2 is reset, pulsed low then left high. Pin 1 is the backlight, on when brightness is above 0 |
+| GT911 or TT21100 touch | Probed at 0x5d, then 0x14, then 0x24. No interrupt pin. X is mirrored |
+| I2C | SDA 17, SCL 18, 400 kHz |
+| ES8311 speaker / ES7210 microphones | MCLK 16, BCLK 9, WS 45, DOUT 8, DIN 10; amplifier enable 48 |
+| Battery | GPIO 6, divider of four. No charge pin and no software power-off |
+
+The glass is a 2.4 inch ILI9341. Color order is BGR, both axes are mirrored, and color inversion stays off. The panel uses Espressif's stock ILI9341 initialization. SPI chip select stays disconnected. The expander enable is held before SPI and touch start.
+
+Hold the screen to talk, swipe down to cancel, and hold the title for one second to open settings. GPIO 0 is the panel data line, so BOOT is not a talk button. The six ADC buttons on GPIO 5, the camera, the microSD card and the red and blue LEDs stay off.
+
+```bash
+cd firmware/esp32
+pio run -e esp32-s3-korvo-2 -t upload -t monitor
+```
+
+The USB port handles flashing and the serial console. For ESP-IDF, use `SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/esp32-s3-korvo-2/sdkconfig.defaults"` with a separate build directory and sdkconfig. Phone setup, pairing and OTA use the same flows as the other ESP32 boards.
+
+Back up the factory image before the first flash:
+
+```bash
+esptool.py --chip esp32s3 read_flash 0 0x1000000 esp32-s3-korvo-2-factory.bin
+```
+
+On a good boot the panel logs `ili9341 320x240 ready` and the expander logs `expander 0x38 levels ready` or `expander 0x20 levels ready`. Run the [hardware checklist](hardware-validation.md) for touch alignment, colors, audio, the battery reading and Wi-Fi setup. The battery percentage uses the default Li-ion estimate. No measured curve is claimed.
+
+References: Espressif's [Korvo-2 BSP](https://github.com/espressif/esp-bsp/tree/67f41a169401d1f23e827188dd08fb351cb0febe/bsp/esp32_s3_korvo_2) at commit `67f41a169401d1f23e827188dd08fb351cb0febe` (Apache 2.0), the [Korvo-2 product page](https://www.espressif.com/en/dev-board/esp32-s3-korvo-2-en) (16 MB flash and 8 MB PSRAM), and the [Korvo-2-LCD user guide](https://docs.espressif.com/projects/esp-adf/en/latest/multimedia-boards/dev-boards/user-guide-esp32-s3-korvo-2-lcd.html). Pin numbers, the ILI9341 mirror, BGR color order, the touch X mirror and the expander levels come from that package. The source of those facts is listed in [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
+
+## LCDWIKI ES3C28P
+
+Use `lcdwiki-es3c28p` for the LCDWIKI ES3C28P (Shenzhen QDtech, spec sheet CR2025-MI6872 V1.0): a 2.8 inch IPS display module with an ESP32-S3, 16 MB QSPI flash and 8 MB octal PSRAM. Freenove's ESP32-S3 2.8 inch display uses the same pin map. The ES3N28P is the same board without the touchscreen and has no profile. This port is experimental, with a [physical report](hardware-validation.md#lcdwiki-es3c28p-physical-report) on one unit.
+
+| Part | Connection |
+|---|---|
+| ILI9341V 240×320 IPS | SPI MOSI 11, clock 12, CS 10, DC 46 (MISO 13 unused). Reset is CHIP_PU, shared with the ESP32-S3. Backlight 45, active high |
+| FT6336G touch | I2C 0x38, reset 18, interrupt 17 |
+| I2C | SDA 16, SCL 15, 400 kHz. Shared by the touch controller, the codec and the 4-pin I2C header |
+| ES8311 speaker and microphone | MCLK 4, BCLK 5, WS 7, DOUT 8, DIN 6. The onboard MEMS microphone goes into the ES8311's ADC |
+| Speaker amplifier | Enable on GPIO 1, active low, held low from boot as a power rail. 1.25 mm 2-pin speaker jack, up to 1.5 W at 8 Ω or 2 W at 4 Ω |
+| Battery | GPIO 9 (ADC1 channel 8), 200 kΩ/200 kΩ divider. 3.7 V Li-polymer on a 1.25 mm 2-pin jack. No charge pin and no software power-off |
+
+The panel runs in portrait with X mirrored, the usual ILI9341 portrait setting: upstream runs it in landscape with only the axis swap, so the unflagged scan is a mirror image. Portrait keeps the touch controller's own axes, because the FT5x06 touch path applies no swap or mirror; on the tested unit touch lines up with the picture up to the edges and corners. If it lands mirrored on another unit, the profile alone cannot correct it. Color order is BGR and color inversion is on, as in upstream's setup. The SPI clock is 20 MHz, as upstream uses. To preview the layout, run `hermes-gadget sim --board sim-240x320`.
+
+Hold the screen or BOOT to talk and swipe down to cancel. RESET is CHIP_PU. The RGB LED on GPIO 42 has a built-in control IC, so the plain `led.set` action does not drive it and it stays off. The microSD slot (SDIO on GPIO 38 to 41, 47 and 48), the UART header and the extension pins (GPIO 2, 3, 14 and 21) are unused.
+
+Back up the factory image before the first flash:
+
+```bash
+esptool.py --chip esp32s3 read_flash 0 0x1000000 lcdwiki-es3c28p-factory.bin
+```
+
+```bash
+cd firmware/esp32
+pio run -e lcdwiki-es3c28p -t upload -t monitor
+```
+
+The USB-C port handles flashing and the serial console. Hold BOOT, press and release RESET, then release BOOT to force download mode. For ESP-IDF, use `SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/lcdwiki-es3c28p/sdkconfig.defaults"` with a separate build directory and sdkconfig. Phone setup, pairing and OTA use the same flows as the other ESP32 boards.
+
+On a good boot the panel logs `ili9341 240x320 ready`. Run the [hardware checklist](hardware-validation.md) first for orientation and colors, then touch alignment at the four corners, the speaker (no sound means check the amplifier enable on GPIO 1), the microphone, the battery reading and Wi-Fi setup. The board reports the battery as a voltage only: with a single-cell 3.7 V Li-ion battery fitted, `set battery_estimate liion` turns on a rough percentage ([battery indicator](using-gadget.md#device-settings-and-hardware-checks)). No measured curve is claimed.
+
+References: the LCDWIKI ES3C28P & ES3N28P product specification sheet V1.0 (2025-06-14), for the pin mapping, the FT6336G address and the active-low amplifier enable; and [xiaozhi-esp32's `freenove-esp32s3-display-2.8-lcd` board](https://github.com/78/xiaozhi-esp32/tree/d91d6824309d12df5fc3db5edf8145ee829135d7/main/boards/freenove-esp32s3-display-2.8-lcd) at commit `d91d6824309d12df5fc3db5edf8145ee829135d7` (MIT), for the ES8311 codec, the inverted amplifier enable, color inversion, BGR order, the SPI clock and the battery divider. The source of those facts is listed in [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
+
 ## ESP32-S3-BOX-3
 
-Use `esp32-s3-box-3` for Espressif's BOX-3 with 16 MB flash and 16 MB octal PSRAM. The original BOX and BOX-Lite need different profiles. This port is experimental, with no physical report recorded.
+Use `esp32-s3-box-3` for Espressif's BOX-3 with 16 MB flash and 16 MB octal PSRAM. The [original BOX](#esp32-s3-box) has its own profile. BOX-Lite needs a different profile. This port is experimental, with no physical report recorded.
 
 | Part | Connection |
 |---|---|
@@ -184,7 +390,7 @@ References: [Espressif hardware overview](https://github.com/espressif/esp-box/b
 
 ## M5Stack CoreS3
 
-Use `m5stack-cores3` for the CoreS3 K128 with 16 MB flash and 8 MB **quad** PSRAM. Core, Core2 and CoreS3 SE are not covered by this profile. The port is experimental for both LCD revisions; physical reports remain outstanding.
+Use `m5stack-cores3` for the CoreS3 K128 with 16 MB flash and 8 MB **quad** PSRAM. Core, Core2 and CoreS3 SE are not covered by this profile. The port is experimental for both LCD revisions; a [camera capture check](hardware-validation.md#m5stack-cores3-camera-capture-check) covers one ILI9342C unit, but full physical reports remain outstanding.
 
 | Part | Connection |
 |---|---|
@@ -196,9 +402,9 @@ Use `m5stack-cores3` for the CoreS3 K128 with 16 MB flash and 8 MB **quad** PSRA
 
 The display selects ILI9342C for touch firmware ID 0x10 and ILI9342E for 0x12. An unrecognized ID leaves the display unavailable and logs an error. M5Stack changed the LCD to ILI9342E in August 2026, so record the panel revision with test results.
 
-Hold the screen to talk, swipe down to cancel, and hold the title for one second to open settings. GPIO 0 carries the audio clock and is not a TALK button. The hardware power and reset buttons retain their functions. Camera, IMU, RTC, SD storage and expansion outputs are not exposed.
+Hold the screen to talk, swipe down to cancel, and hold the title for one second to open settings. GPIO 0 carries the audio clock and is not a TALK button. The hardware power and reset buttons retain their functions. The camera is the `camera.capture` action and a local **camera mode** (the settings menu's **Camera** item, below); the IMU, RTC, SD storage and expansion outputs are not exposed.
 
-The power adapter enables the audio supplies (ALDO1 at 1.8 V and ALDO2 at 3.3 V), the onboard boost, and peripheral reset lines. Brightness controls the DLDO1 backlight supply between 2.5 and 3.3 V; zero disables that rail. It preserves charger settings, other rail settings and USB/bus output-enable bits. Settings provide battery readings, local power-off, screen timeout and hardware checks.
+The power adapter enables the audio supplies (ALDO1 at 1.8 V and ALDO2 at 3.3 V), the onboard boost, and peripheral reset lines. Camera start-up turns on the camera ribbon's supplies (ALDO3 at 3.3 V, BLDO1 and BLDO2, as in esp-bsp's CoreS3 camera bring-up), which the camera and the proximity sensor share, pulses the camera enable on AW9523 P1_0, and starts the pipeline — when the camera mode opens or the first capture arrives, not at boot; see [Camera (GC0308)](#camera-gc0308) for the start/stop lifecycle. Brightness controls the DLDO1 backlight supply between 2.5 and 3.3 V; zero disables that rail. It preserves charger settings, other rail settings and USB/bus output-enable bits. Settings provide battery readings, local power-off, screen timeout and hardware checks.
 
 ```bash
 cd firmware/esp32
@@ -207,9 +413,150 @@ pio run -e m5stack-cores3 -t upload -t monitor
 
 For ESP-IDF, use `SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/m5stack-cores3/sdkconfig.defaults"` with a separate build directory and sdkconfig. Use the USB-C data port for flashing and the console. To enter download mode, hold RESET for about three seconds until the green indicator lights. Phone Wi-Fi setup, pairing and OTA use the standard ESP32 flows.
 
+### Camera (GC0308)
+
+The CoreS3's GC0308 camera (0.3 MP VGA, on the same ribbon cable as the
+LTR-553ALS-WA proximity sensor) is available as a `camera.capture` action. The
+adapter drives the sensor's power/reset over AW9523B P1_0, the SCCB hangs off
+the internal I2C bus (AXP2101 and AW9523 share it), and the DVP pins come
+straight from M5Stack's CoreS3 camera table:
+
+| GC0308 pin | ESP32-S3 GPIO |
+|---|---|
+| SCCB SIOC | 11 |
+| SCCB SIOD | 12 |
+| XCLK | **none** — the sensor runs from its on-board 20 MHz crystal, so the port never generates XCLK (the LCD_CAM divider still needs the rate) |
+| VSYNC | 46 |
+| HREF | 38 |
+| PCLK | 45 |
+| D0–D7 | 39, 40, 41, 42, 15, 16, 48, 47 |
+| CAM_RST | AW9523B P1_0 |
+
+Captures are 640×480 tightly packed RGB565, byte-swapped on-device to the
+little-endian layout the gateway documents; the frame buffer lives in PSRAM.
+The driver is [esp32-camera](https://github.com/espressif/esp32-camera).
+
+The camera also has a **camera mode**: the settings menu's **Camera** item
+(shown only on boards whose port provides a camera) opens the device's own
+camera screen. The live view is the VGA stream blitted straight into the panel
+rows between the bars at about 10 fps, **mirrored left-to-right** like a
+phone's front camera so the view moves the way a hand aimed at it moves — the
+held photo (it lives only in the mode's memory, discarded on retake or
+leaving) and the `camera.capture` action keep the sensor's own handedness.
+The mode keeps the capture pipeline's frame size, because the driver queues
+only frames as large as its frame-buffer allocation. A tap starts a 3-second
+countdown (a large number over the live view) and captures; the photo stays on
+screen until the next tap (retake: the live view comes back first) or a swipe
+down leaves. The screen never dims while the camera is out, and the mode
+leaves itself after 60 s with no touch.
+
+The pipeline starts when the camera mode opens or the first `camera.capture`
+arrives, and stops — while the camera mode is closed — when it leaves, or 60 s
+after the last capture (an open mode stays up; closing it stops the pipeline
+at once): the driver's frame buffers go back to PSRAM, the sensor is held in
+reset, and the ribbon's supplies (ALDO3 at 3.3 V, BLDO1 and BLDO2) go off. A
+start that fails hides the Camera item and refuses captures until the next
+restart. On a board without touch, `camera` on the serial console opens the
+mode and `camera close` leaves.
+
 Before relying on the port, run the [physical checklist](hardware-validation.md), including all touch corners, LCD colors, microphone level, speaker playback and interruption, backlight range, USB recovery, and battery shutdown/wake. Test USB and battery power separately.
 
 References: [M5Stack hardware and recovery instructions](https://docs.m5stack.com/en/core/CoreS3), [Espressif board definitions](https://github.com/espressif/esp-bsp/tree/master/bsp/m5stack_core_s3), [AW9523 registers](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/products/core/CoreS3/AW9523B-EN.pdf), and [AXP2101 registers](https://files.waveshare.com/wiki/common/X-power-AXP2101_SWcharge_V1.0.pdf). See [README](../README.md#license) for driver licenses and the adapted ILI9342E table's notice.
+
+## Waveshare ESP32-S3-Touch-AMOLED-1.32
+
+Board option `waveshare-touch-amoled-132`, for the Waveshare ESP32-S3-Touch-AMOLED-1.32: an ESP32-S3-PICO-1-N8R8 with 8 MB flash and 8 MB octal PSRAM, a round 1.32" 466×466 CO5300 panel over QSPI, a CST820 touchscreen, and one ES8311 codec for the speaker and the microphone. This port is experimental. It has not been run on a board.
+
+**Back up the whole flash before the first flash.** The board has no other copy of its factory firmware:
+
+```bash
+esptool.py --chip esp32s3 read_flash 0 0x800000 touch-amoled-132-factory.bin
+```
+
+Writing that file back at `0x0` restores the original firmware.
+
+| Part | Connection |
+|---|---|
+| CO5300 466×466 AMOLED, QSPI | CS 10, clock 11, D0–D3 12/13/14/15, reset 8; 40 MHz; column offset 6 |
+| CST820 touch | I2C 0x15 on SDA 47, SCL 48; reset 7; interrupt 6 unused because input is polled |
+| ES8311 speaker and microphone | I2C 0x18 on the same bus; MCLK 38, BCLK 39, WS 41, DOUT 42, DIN 40; amplifier enable 46 |
+| Power latch | GPIO 18 held high. PWR is GPIO 17 |
+| BOOT | GPIO 0, TALK |
+
+Hold the screen or BOOT to talk, tap to answer yes, and swipe down to cancel. A short press on PWR turns the screen off and on. Holding PWR drops GPIO 18, which releases the battery latch. USB can still power the board after that. The round 466 layout is the existing `sim-466x466-round` simulator profile. That profile also has a motion sensor, and this board does not.
+
+The CO5300 bring-up is the short table from Waveshare's board support package, with a 100 ms wait after sleep-out. The 1.75" table writes extra registers and waits 600 ms, so this profile does not use it. xiaozhi-esp32 writes memory-access control `0xC0` after init, which rotates the picture 180 degrees. This profile does not. If a unit shows the picture upside down, that register is the first thing to check.
+
+The product has a lithium-battery header. Neither the board support package nor the pin list that names GPIO 17 and GPIO 18 names a battery-sense pin, so this profile does not report voltage or a percentage. Do not add a divider ratio without a schematic.
+
+**Build and flash it** with PlatformIO:
+
+```bash
+cd firmware/esp32
+pio run -e waveshare-touch-amoled-132 -t upload -t monitor
+```
+
+Or with `idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/waveshare-esp32-s3-touch-amoled-1.32/sdkconfig.defaults" build`. The USB-C port is the module's USB Serial/JTAG, so flashing and the serial console (115200 baud) both use it.
+
+### First flash: what to check
+
+1. **Boot log:** `CO5300 466x466 ready` and `codecs: speaker ready, microphones ready (es8311 analog)`. `hermes-gadget diag` should list the display and I2C devices `0x18` and `0x15`.
+2. **Screen:** the mascot is upright inside the round glass, and the colors are right. A picture that is upside down is a candidate for memory-access control `0xC0`. A shifted picture means the column offset of 6 is wrong.
+3. **Touch:** holding the screen records, a swipe down cancels, and taps land where you touch.
+4. **Microphone and speaker:** hold BOOT and speak; the waves move with your voice. Replies are clear (`set volume 80`).
+5. **Power:** on battery, a short PWR press turns the screen off and on, and holding PWR powers the board off. GPIO 18 must stay high while the board should remain on. `status` does not show a battery voltage.
+
+Pin numbers, the CO5300 command bytes and the column gap follow Waveshare's `esp32_s3_touch_amoled_1_32` board support package at commit `b9a73081`. GPIO 17 and GPIO 18 follow xiaozhi-esp32's `waveshare/esp32-s3-touch-amoled-1.32` board at commit `49b4380b` (tag v2.5.2). See [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
+
+## Waveshare ESP32-S3-Touch-AMOLED-1.43C
+
+Board option `waveshare-touch-amoled-143c`, for the Waveshare ESP32-S3-Touch-AMOLED-1.43C: an ESP32-S3-PICO-1-N8R8 with 8 MB flash and 8 MB octal PSRAM, a round 1.43" 466×466 CO5300 panel over QSPI, a CST820 touchscreen, an ES8311 speaker and ES7210 microphones. This port is experimental. It has not been run on a board.
+
+This is not the older ESP32-S3-Touch-AMOLED-1.43. That board has 16 MB flash, a different pin map, an IMU and an RTC. Do not flash this image onto it.
+
+**Back up the whole flash before the first flash.** The board has no other copy of its factory firmware:
+
+```bash
+esptool.py --chip esp32s3 read_flash 0 0x800000 touch-amoled-143c-factory.bin
+```
+
+Writing that file back at `0x0` restores the original firmware.
+
+| Part | Connection |
+|---|---|
+| CO5300 466×466 AMOLED, QSPI | CS 15, clock 14, D0–D3 9/10/11/12, reset 13; 40 MHz; column offset 8; memory-access control `0xC0` |
+| CST820 touch | I2C 0x15 on SDA 47, SCL 48; reset 16; interrupt 17 unused because input is polled; both axes mirrored to match the panel |
+| ES8311 speaker | I2C 0x18 on the same bus; MCLK 38, BCLK 39, WS 40, DOUT 41, DIN 42; amplifier enable 46 |
+| ES7210 microphones | I2C 0x40 on the same bus; MIC1 and MIC2. MIC3 is the playback reference and stays off |
+| Codec supply | GPIO 18 held high. This is the audio LDO, not a battery latch |
+| Battery | GPIO 4, ADC1 channel 3, calibrated millivolts times 2. GPIO 7 is low while charging. GPIO 5 is the charge LED and is unused |
+| BOOT | GPIO 0, TALK |
+| Tearing | GPIO 8, unused |
+
+Hold the screen or BOOT to talk, tap to answer yes, and swipe down to cancel. There is no power key and no software power-off. The round 466 layout is the existing `sim-466x466-round` simulator profile. That profile also has a motion sensor, and this board does not.
+
+The CO5300 bring-up follows the factory component: the short table, a 120 ms wait after sleep-out, a column offset of 8, and a 180 degree rotation. The 1.32" table uses a column offset of 6 and does not rotate, so this profile does not use it. The factory table itself leaves the pixel format and the window to the CO5300 driver, writes brightness `0x00`, then mirrors both axes. This driver sends those steps in the same table and writes brightness `0xFF`, which is the factory default of 100%. A shifted picture means the column offset of 8 is wrong.
+
+GPIO 4 reports a voltage. It does not report a percentage until `set battery_estimate liion`. The divider ratio comes from the vendor example (`calibrated millivolts * 2`). It is not a measured curve. `status` shows `battery_mv` and `charging`.
+
+**Build and flash it** with PlatformIO:
+
+```bash
+cd firmware/esp32
+pio run -e waveshare-touch-amoled-143c -t upload -t monitor
+```
+
+Or with `idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/waveshare-esp32-s3-touch-amoled-1.43c/sdkconfig.defaults" build`. The USB-C port is the module's USB Serial/JTAG, so flashing and the serial console (115200 baud) both use it.
+
+### First flash: what to check
+
+1. **Boot log:** `CO5300 466x466 ready` and `codecs: speaker ready, microphones ready (es7210)`. `hermes-gadget diag` should list the display and I2C devices `0x18`, `0x40` and `0x15`.
+2. **Screen:** the mascot is upright inside the round glass, and the colors are right. A shifted picture means the column offset of 8 is wrong.
+3. **Touch:** holding the screen records, a swipe down cancels, and taps land where you touch. A touch that lands opposite the picture means the 180 degree mirror is wrong.
+4. **Microphone and speaker:** hold BOOT and speak; the waves move with your voice. Replies are clear (`set volume 80`).
+5. **Power:** `status` shows `battery_mv` with a cell fitted, and `charging` while the charger is active. GPIO 18 must stay high or the codecs have no supply. There is no power-off command.
+
+Pin numbers, the CO5300 command bytes, the column gap, the codec supply and the battery divider follow Waveshare's ESP32-S3-Touch-AMOLED-1.43C repository at commit `8cea11dd`. See [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
 
 ## ESP32-S3-Touch-AMOLED-1.75C
 
@@ -387,7 +734,7 @@ Board option `esp32s3-touch-amoled-206`, for Waveshare's 2.06" AMOLED touch watc
 | Touch | FT3168 | I2C 0x38, read with the FT5x06 driver; reset 9; INT 38, read on its falling edge (the idle chip dozes, refuses reads and reports its waking touch only briefly) |
 | Speaker DAC | ES8311 | I2C 0x18; I2S MCLK 16, BCLK 41, WS 45, DOUT 40; NS4150B amplifier enable 46 |
 | Microphones | ES7210 | I2C 0x40; two microphones on MIC1/MIC2 (MIC3 is the speaker loopback, unused); I2S DIN 42 |
-| Power | AXP2101 | I2C 0x34; battery/USB readings, PWR short press and local power-off; charging and rails keep their defaults |
+| Power | AXP2101 | I2C 0x34; battery/USB readings, PWR short press and local power-off; charging and rails keep their defaults; battery percent from a measured discharge curve |
 | Clock chip | PCF85063 | I2C 0x51; keeps the time in UTC across resets, set from network time (resting clock) |
 | I2C bus | | SDA 15, SCL 14, 400 kHz |
 | BOOT key | | GPIO 0 |
@@ -395,9 +742,11 @@ Board option `esp32s3-touch-amoled-206`, for Waveshare's 2.06" AMOLED touch watc
 
 The audio codecs and amplifier run from the always-on 3.3 V rail, so no AXP2101 rail is switched for audio. The UI uses rows 8–493 of the panel. The glass corners are rounded with a radius of about 100 px (measured with a test grid), so the status row also keeps its text 64 px (`corner_inset`) in from the sides.
 
+On battery the percentage follows a discharge curve measured on the watch's own cell (`kAmoled206Curve`), at the median voltage of the last minute, and never rises until the watch is charged; a full watch shows 100 right after unplugging. The AXP2101 gauge it replaces read low through most of a discharge: 25% with 42% left, the 15% alert with over two hours left, and 0% 11 minutes before shutdown. The curve comes from one full discharge of 8 h 14 min with light use and the screen mostly dark ([battery report](hardware-validation.md#waveshare-amoled-206-battery-report)), so a heavier load reads a few points low. While charging the percentage is still the gauge's, and it shows 100 once the AXP2101 reports charging done: the cell reaches 4.18 V less than halfway through a charge, so the voltage can't tell how far the charge has got.
+
 The microphones are quiet: speech averaged about 170 RMS at the default 24 dB gain, under tap mode's usual 500 floor. This profile sets 30 dB and a floor of 200 (`codec.mic_gain_db`, `codec.vad_min_rms`), and tap mode's noise estimate still raises the threshold in a loud room.
 
-The CPU drops to 80 MHz when idle, but light sleep stays disabled. The FT3168's short interrupt pulse is not configured as a CPU wake source, and its report can expire before a sleeping CPU reads it. Enabling light sleep needs GPIO wake support and a physical wake test on battery. The [partial physical report](hardware-validation.md#waveshare-amoled-206-partial-physical-report) covers USB operation; the port stays experimental.
+The CPU drops to 80 MHz when idle. While the screen is dark, on battery and idle, the chip also light-sleeps between Wi-Fi beacons, and once Hermes has been quiet for 10 s the radio wakes only every third beacon ([Wi-Fi power save](porting.md#battery-and-power)). The FT3168 reports a touch with one short INT pulse, and its report is gone about 20 ms later, so while dozing INT becomes a low-level wake source: a tap wakes the CPU, and the touch task reads the report right after. With `touch_wake` off, a doze leaves INT quiet, and only BOOT or PWR wakes the chip. Light sleep never runs while a USB host is connected (the console and JTAG would stop), so a doze shows only on battery. The [partial physical report](hardware-validation.md#waveshare-amoled-206-partial-physical-report) covers USB operation, and the [light sleep report](hardware-validation.md#waveshare-amoled-206-light-sleep-report) covers dozing on battery; the port stays experimental.
 
 Two more hardware facts for anyone building on this board. The QMI8658 is mounted a quarter turn from the screen: its +x axis points to the screen's bottom, +y to its left and +z out of the back (checked by tilting the watch). The schematic's vibration motor is not fitted: there is a driver (an NPN from GPIO 18) and two pads, P1 (the AXP2101's ALDO3) and P2, for a motor.
 
@@ -451,7 +800,7 @@ cd firmware/esp32
 pio run -e esp32s3-touch-amoled-216 -t upload -t monitor
 ```
 
-The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the serial console. If the port does not appear, hold BOOT while plugging in USB to enter download mode.
+The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the serial console. If the port does not appear, hold BOOT while plugging in USB to enter download mode. If the board shows nothing and writes no log after flashing, unplug USB and plug it in again, with the battery disconnected if one is fitted, since it keeps the board powered: one unit without a battery stayed in download mode after a full image was written with `esptool`, until it was power-cycled ([partial report](hardware-validation.md#waveshare-amoled-216-partial-physical-report)).
 
 ### First flash: what to check
 
@@ -501,6 +850,42 @@ The profile expects the USB-C port to be the S3's own USB Serial/JTAG, used for 
 6. **Console:** `hermes-gadget diag` answers over the USB-C port.
 
 The pin map follows xiaozhi-esp32's `xorigin/aipi-lite` board at commit `0d576d3`; see [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
+
+## M5Stack StickS3
+
+Board option `m5stack-sticks3`, for M5Stack's StickS3: an ESP32-S3-PICO-1-N8R8 (8 MB flash, 8 MB octal PSRAM), a 1.14" 135×240 ST7789P3 panel used in landscape, one ES8311 codec for both the speaker and the microphone, an AW8737 amplifier, two keys, a BMI270 IMU and a 250 mAh battery behind an M5PM1 power manager. This port is experimental; see its [verification status](hardware-validation.md#current-hardware).
+
+| Part | Chip | Connection |
+|---|---|---|
+| Display | ST7789P3, SPI | MOSI 39, SCLK 40, CS 41, DC 45, RST 21; backlight GPIO 38; 240×135 window at x 40, y 53 of the controller's RAM |
+| Speaker DAC + microphone ADC | ES8311 | I2C 0x18 on SDA 47, SCL 48; I2S MCLK 18, BCLK 17, WS 15, DOUT 14, DIN 16; clocked from BCLK |
+| Power manager | M5PM1 | I2C 0x6E; its GPIO2 switches the LCD rail, its GPIO3 enables the AW8737 amplifier, its GPIO0 reads the charge status (low while charging); battery voltage, USB presence and shutdown |
+| Motion | BMI270 | I2C 0x68; its axes match the device frame, so no remapping |
+| Keys | | KEY1 GPIO 11 (TALK, the front key), KEY2 GPIO 12 (CANCEL, a side key); the other side key is the M5PM1's power button (single click powers on or resets, double click powers off, long press enters download mode) and is not read by the firmware |
+
+The LCD rail and the amplifier are switched over I2C, not from ESP32 pins: `StickS3Board` (`port_sticks3.cpp`, `drivers/sticks3.cpp`) turns the rail on before the panel starts and the amplifier on only while audio plays. It is also the board's `Power`: battery millivolts, a percent estimated from the voltage curve (it reads high while charging), USB presence, charging, and **Power off** in settings through the PM1's shutdown command. The BMI270 (`drivers/bmi270.cpp`) needs Bosch's configuration image loaded after every reset, which takes about 8 KB of I2C writes at boot; it then gives face-down sleep (`set face_down_sleep on`). The IR transceiver isn't used yet.
+
+**Build and flash it** with PlatformIO:
+
+```bash
+cd firmware/esp32
+pio run -e m5stack-sticks3 -t upload -t monitor
+```
+
+If the board doesn't enter download mode, connect USB and hold the power button (the side key that isn't KEY2) until the internal green LED flashes.
+
+The StickS3 has two side keys. KEY2 is an ESP32 input and does nothing while the device is off; only the power button turns it back on after **Power off**.
+
+### First flash: what to check
+
+1. **Boot log:** `codecs: speaker ready, microphones ready (es8311 analog)`. The `hg.diag` parts line should read `display st7789, microphone es8311, speaker es8311`. `M5PM1 initialization failed` means the power manager didn't answer on I2C, and the screen stays dark.
+2. **Screen:** the mascot is upright and not mirrored, with no stripe of noise along an edge. A one-pixel stripe means `lcd.gap_y` should be 52; an upside-down picture means `lcd.mirror_x`/`mirror_y` in `board.cpp` need flipping.
+3. **Microphone:** hold KEY1 and speak; the waves move with your voice and Hermes's transcript is right.
+4. **Speaker:** replies are clear and loud enough (`set volume 80`). Silence with a working microphone points at the M5PM1 amplifier enable; distorted audio, at the codec clock (`codec.dac_mclk`).
+5. **Console:** `hermes-gadget diag` answers over the USB-C port, with `imu bmi270`. `status` shows `power` with `battery_mv` and `charging`.
+6. **Motion:** lying screen up, `diag` reads `motion.z` near `+1000`; face down near `-1000`; standing with the picture upright, `motion.y` near `+1000`; with the picture's right edge up, `motion.x` near `+1000`.
+
+The M5PM1 sequence and the panel's window follow M5Stack's M5GFX and M5Unified StickS3 setup.
 
 ## Spotpear ESP32-S3-1.54 muma
 
@@ -805,7 +1190,10 @@ Board option `ws-p4-touch-lcd-3.4c`, for Waveshare's ESP32-P4-WIFI6-Touch-LCD-3.
 | Microphone | ES7210 ADC (dual mic) | I2S MCLK 13, BCLK 12, WS 10, DIN 11 |
 | Speaker | ES8311 codec + amp | I2S DOUT 9; amplifier enable GPIO 53 (active high) |
 | Wi-Fi / BLE | ESP32-C6 companion | standard P4 function-board SDIO pins |
+| MicroSD | SDIO 3.0 slot, 4-bit | CLK 43, CMD 44, D0–D3 39–42 (Waveshare XC pinout) |
 | LCD reset | | GPIO 27 |
+
+The microSD slot is FAT32 only; the firmware never formats a card. With `set sd_log on`, the device log is copied to `hermes.log` on the card (rotating past 512 KB to `hermes.log.1`), including when the card is inserted after boot. The slot is SDMMC slot 0; slot 1 carries the C6 companion's SDIO link and stays with it.
 
 Build with `idf.py` (no PlatformIO env):
 
@@ -820,6 +1208,40 @@ Releases don't include this board yet, so the browser installer doesn't list it.
 Experimental. The owner confirmed the display, C6-hosted Wi-Fi, pairing, reconnect after restart, factory reset and a one-hour run; touch coordinates, the microphone, the speaker, network recovery and OTA are not verified. See the [partial physical report](hardware-validation.md#waveshare-p4-touch-lcd-34c-partial-physical-report).
 
 Wi-Fi caveat: the ESP32-C6 companion on this board does not ship with an esp_hosted slave image that this host (esp_hosted 2.12.6) can talk to. `g_wifi.begin()` times out after about 10 s and the gadget runs offline until the C6 is flashed. Flash `network_adapter.bin` (CrowPanel C6 firmware, V2.12.3, in `CrowPanel_Advance_ESP32-P4 Display_Firmware_Upgrade_Guide/.../`) to the C6 through its SH1.0 UART header with esptool before expecting Wi-Fi. The [report](hardware-validation.md#getting-the-c6-working-on-this-board) lists every step that was needed.
+
+## Waveshare ESP32-P4-WIFI6-Touch-LCD-7B
+
+Board option `ws-p4-touch-lcd-7b`, for Waveshare's ESP32-P4-WIFI6-Touch-LCD-7B (SKU 32510): a 1024x600 MIPI-DSI panel using EK79007, GT911 capacitive touch, ES8311 speaker codec plus ES7210 microphone ADC, and ESP32-C6 Wi-Fi over 4-bit SDIO. Hardware pins and display timings follow Waveshare's BSP component 3.0.1; the board configuration targets the ESP32-P4 rev 3 silicon family and 32 MiB flash observed on the connected device.
+
+| Part | Chip | Connection |
+|---|---|---|
+| Display | EK79007, 1024x600 MIPI-DSI | 2 data lanes @ 1000 Mbps; DPI 52 MHz; H: 10/160/160, V: 1/23/12; DSI PHY internal LDO channel 3 @ 2500 mV; software 180° X/Y framebuffer transform |
+| Backlight | PWM | GPIO 32, inverted output |
+| Touch | GT911 | I2C SDA 7, SCL 8; reset and interrupt not connected; polling; axes unmirrored to match the software-rotated display |
+| Microphone | ES7210 ADC (dual mic) | I2S MCLK 13, BCLK 12, WS 10, DIN 11 |
+| Speaker | ES8311 codec + amp | I2S DOUT 9; amplifier enable GPIO 53 (active high) |
+| Wi-Fi / BLE | ESP32-C6 companion | SDIO CMD 19, CLK 18, D0-D3 14-17; reset GPIO 54 (active high) |
+| Camera | Optional OV5647 | Two-lane MIPI-CSI; SCCB shares I2C SDA 7/SCL 8; vendor preview example assigns no separate reset/PWDN GPIO |
+| LCD reset | | GPIO 33 |
+| Console | USB-to-UART bridge | UART0, 115200 baud; USB Serial/JTAG remains secondary |
+
+On camera-equipped 7B units, the firmware exposes `camera.capture`. It captures an OV5647 still, reduces it to 640×512 RGB565 for the existing generic action result, and returns `format`, `width`, `height`, and `image_b64` in the existing action result; see [Device actions](protocol.md#device-actions). The plugin saves it as a timestamped PNG under `~/.hermes/gadgetpix/` and returns the file's path, not the image. This reuses the current action/result message types; no new protocol messages are added. SKU 32510 is the standard version without the bundled camera; an OV5647 module is required. The camera connector and SCCB wiring follow Waveshare's [camera preview example](https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B/tree/9fcd49a8c927a00f5583c22d568b3448addbe51c/examples/arduino/examples/06_Camera_Preview) at commit `9fcd49a8c927a00f5583c22d568b3448addbe51c`; no vendor source code is copied. Two device captures were completed on the attached camera module. In the integrated development test, the plugin saved the latest result as a valid 640×512 PNG; its image content and quality were not visually reviewed, and broader physical validation remains incomplete. See [hardware validation](hardware-validation.md#waveshare-p4-7b-camera-and-online-smoke-test).
+
+Build with ESP-IDF 6.1.0 (the project's P4 CI toolchain) and the board defaults:
+
+```bash
+cd firmware/esp32
+idf.py -B build/ws-p4-touch-lcd-7b \
+    -D SDKCONFIG=build/ws-p4-touch-lcd-7b/sdkconfig \
+    -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/ws-p4-touch-lcd-7b/sdkconfig.defaults" \
+    set-target esp32p4 build
+idf.py -B build/ws-p4-touch-lcd-7b \
+    -D SDKCONFIG=build/ws-p4-touch-lcd-7b/sdkconfig \
+    -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/ws-p4-touch-lcd-7b/sdkconfig.defaults" \
+    -p <PORT> flash monitor
+```
+
+This is an experimental profile. Touch input/coordinates, actual microphone capture, audible speaker output, Wi-Fi loss/recovery, OTA and the full physical checklist remain unverified.
 
 ## Build and flash
 
@@ -909,7 +1331,7 @@ A device refused for a gateway route has `"unpaired_reason": "routed"` in `statu
 | `forget-key` | New device identity on next boot (re-enrollment and re-pairing) |
 | `factory-reset` | Erase the device key and all settings |
 
-The keys are `name`, `server`, `token`, `talk_mode` (`hold` or `tap`), `volume`, `brightness`, `screen_timeout` (0..3600 seconds, 0 disables it), `clock` (0 or 5..3600 seconds of rest before the resting clock shows; 0, the default, turns it off), `time_format` (`12h` or `24h`, the clock face), `timezone` (a POSIX TZ string such as `CET-1CEST,M3.5.0,M10.5.0/3`; the default `UTC0`; ESP32 boards), `battery_display` (`icon`, `percentage`, `both` or `off`), `language` (`en`, `es`, or `auto` to follow Hermes; see [Language](using-gadget.md#language)), `wifi_ssid` and `wifi_pass`. The [device settings menu](using-gadget.md#device-settings-and-hardware-checks) saves volume, brightness, talk mode, battery indicator, screen timeout, clock face and language without a console.
+The keys are `name`, `server`, `token`, `talk_mode` (`hold` or `tap`), `touch_talk` (`on` or `off`; touchscreens with a TALK button, see [Touch to talk](using-gadget.md#device-settings-and-hardware-checks)), `volume`, `brightness`, `screen_timeout` (0..3600 seconds, 0 disables it), `clock` (0 or 5..3600 seconds of rest before the resting clock shows; 0, the default, turns it off), `time_format` (`12h` or `24h`, the clock face), `timezone` (a POSIX TZ string such as `CET-1CEST,M3.5.0,M10.5.0/3`; the default `UTC0`; ESP32 boards), `battery_display` (`icon`, `percentage`, `both` or `off`), `wifi_deep_sleep` (`on`, the default, or `off`; see [Deep Wi-Fi sleep](using-gadget.md#device-settings-and-hardware-checks)), `animation` (`on`, the default, or `off`; see [Animation](using-gadget.md#device-settings-and-hardware-checks)), `sd_log` (`on` or `off`, off by default; boards with a microSD slot, see [SD card logging](using-gadget.md#device-settings-and-hardware-checks)), `language` (`en`, `es`, or `auto` to follow Hermes; see [Language](using-gadget.md#language)), `wifi_ssid` and `wifi_pass`. Firmware built with [tailnet support](tailnet.md) adds `tailnet` (`on` or `off`) and `ts_key` (a Tailscale auth key; `get` shows `<set>`). The [device settings menu](using-gadget.md#device-settings-and-hardware-checks) saves volume, brightness, talk mode, touch to talk, battery indicator, screen timeout, clock face and language without a console.
 
 In the `diag` report, `i2c` lists the addresses that answered, such as `0x18`. A probe can time out while another task uses the bus, so the scan tries each address up to three times. An address that times out on every try appears as `timeout at 0x19`, and the scan continues. Four such addresses in a row end the scan with `bus stuck at` the first of them, such as `bus stuck at 0x08`. That usually means a device or a short holds SDA or SCL low.
 
@@ -960,4 +1382,238 @@ How long a reconnect takes has not been measured on hardware for this firmware.
 - Push-to-talk or tap with energy VAD. There is no wake word; the protocol leaves room for one (`audio.start.mode`).
 - Wi-Fi setup works over USB or a temporary password-protected network. A Bluetooth link for a phone app exists, but no board enables it yet: each board turns it on after it passes the [Bluetooth checks](hardware-validation.md#bluetooth). There is no phone app in this repository.
 - Firmware updates are authorized with the device key, but images aren't signed: the bootloader runs whatever a trusted Hermes installs. Secure Boot isn't enabled.
-- The text font is ASCII only; the host folds other characters.
+- Keyboard entry is ASCII. Replies use the shared font (ASCII, Latin-1 and the Russian alphabet); the plugin folds other characters to what it draws.
+
+## M5Stack Cardputer ADV
+
+Experimental profile `cardputer-adv`, for **K132-Adv with Stamp-S3A** only.
+The original Cardputer and Cardputer v1.1 have different audio and keyboards.
+ESP32-S3FN8 provides 8 MB flash and no PSRAM. SD is not required: firmware,
+Wi-Fi configuration and pairing identity live in internal flash/NVS.
+
+| Peripheral | Wiring |
+|---|---|
+| ST7789V2, landscape 240x135 | MOSI 35, SCLK 36, CS 37, DC 34, reset 33, backlight 38 |
+| Shared I2C | SDA 8, SCL 9; ES8311 at 0x18, TCA8418 at 0x34 |
+| ES8311 duplex I2S | BCLK 41, LRCLK 43, speaker data 42, microphone data 46; no MCLK wire |
+| TCA8418 keyboard | Interrupt GPIO11; 7x8 scan matrix mapped to the 4x14 printed layout |
+| G0 / BOOT | GPIO0, active low |
+| Battery sense | GPIO10, divider ratio 2; voltage only |
+
+The ES8311 derives its clock from BCLK. The existing Gadget codec driver owns
+both directions; the microphone and speaker share the codec. No amplifier
+control GPIO is assigned; the headphone jack disables the speaker in hardware.
+The BMI270, SD slot, RGB LED and IR are left unused.
+
+### Build and first flash
+
+```bash
+cd firmware/esp32
+pio run -e cardputer-adv -j 1
+```
+
+Before the first install, read and keep a complete 8 MB flash backup with
+esptool. Keep it private: it can contain settings from the previous firmware.
+For recovery hold G0 while connecting USB with the power switch OFF, as in
+[M5Stack's download-mode instructions](https://docs.m5stack.com/en/core/Cardputer-Adv).
+
+```bash
+esptool --chip esp32s3 --port /dev/ttyACM0 read-flash 0 ALL original-cardputer-adv.bin
+pio run -e cardputer-adv -t upload --upload-port /dev/ttyACM0
+```
+
+The initial install replaces the previous bootloader and partition table,
+including an existing launcher. Restore the complete backup at address 0 to
+return to the previous installation. This profile uses Gadget's normal two
+application slots and rollback behavior; it does not preserve M5Launcher.
+
+Configure Wi-Fi and the Hermes URL over the USB serial console, or through
+[phone setup](setup-board.md#set-up-wi-fi-with-your-phone), then approve pairing
+on the Hermes server. The USB console runs through the S3's native Serial/JTAG
+port, not the UART pins used by audio.
+
+### Enter Wi-Fi from a phone
+
+The network name and password shown on the **setup** screen belong to the
+Cardputer's temporary access point. They are not fields to fill with its keyboard.
+
+1. Open the phone's Wi-Fi settings and join that temporary network with the
+   password currently displayed on the Cardputer. Stay connected if the phone
+   warns that the network has no internet.
+2. Open `http://192.168.4.1` in the phone's browser.
+3. Enter your home **2.4 GHz** Wi-Fi name and password. Keep the Hermes URL
+   already provisioned, or enter the server's Gadget URL.
+4. Choose **Check connection and save**. When it succeeds, reconnect the phone
+   to its usual Wi-Fi and approve the Cardputer's pairing code on Hermes.
+
+The temporary network expires after ten minutes. To reopen it, press Tab on the
+Cardputer, navigate with Fn+; / Fn+. to **Wi-Fi setup**, and select with Enter.
+USB console command `wifi-setup` opens it too. Each setup session has a new
+password; use the current one shown on the display.
+
+The keyboard editor in this profile sends chat messages after connection. Wi-Fi
+credentials are entered on the phone page or provisioned over USB.
+
+### Controls
+
+| Control | Action |
+|---|---|
+| Hold G0, speak, release | Voice request; tap selects in settings or answers a prompt |
+| Type, then Enter | Open local editor and send a text message (up to 256 ASCII characters) |
+| Shift + character | Uppercase or printed symbol |
+| Backspace | Delete the last draft character |
+| Fn + Esc (the backtick key) | Discard draft, cancel recording/reply, or go Back |
+| Fn + ; / Fn + . | Scroll up / down; navigate settings |
+| Tab or Fn + Enter | Open settings |
+| Enter in settings or a prompt | Select / confirm |
+| Fn + P | Next configured Hermes profile |
+| Fn + Z | Screen off/on; Wi-Fi stays connected |
+
+The editor is local to this board port. It neither sends unfinished text nor
+executes typed console commands. Typing is enabled on Ready and reply screens
+while online and idle. A network loss, incoming prompt, alarm, update or active voice turn closes the editor and
+clears the draft. The first keyboard press on a dark screen only wakes it.
+The normal Gadget display returns after sending or discarding a draft.
+
+### Sources and verification
+
+Hardware facts: [M5Stack K132-Adv product page and schematic](https://docs.m5stack.com/en/core/Cardputer-Adv),
+[M5Cardputer bf64d317](https://github.com/m5stack/M5Cardputer/tree/bf64d3178ab43928fa02365fbe3937cec99716ad)
+(key layout and TCA8418 scan mapping),
+[M5Unified 96576a14](https://github.com/m5stack/M5Unified/tree/96576a14247ddc935149145aa6b51943464120f1)
+(audio clock source and battery divider), and
+[M5GFX 28d47949](https://github.com/m5stack/M5GFX/tree/28d47949bdc84f30881623476f555398e2194313)
+(panel geometry). No vendor implementation is copied.
+
+USB smoke testing on a connected K132-Adv / Stamp-S3A identified ESP32-S3 rev
+v0.2, 8 MB flash and no PSRAM. The PCB revision was not recorded. The initial
+checks below used firmware built from upstream `7e18943` (0.5.0) plus this
+Cardputer port, including its display-initialization guard. The later OTA report
+uses the rebased port and a Cardputer-specific receive-buffer fix. Installation
+checksum verification passed.
+Firmware 0.5.0 booted and reported ST7789 240x135, ES8311 microphone and speaker,
+and a ready TCA8418; I2C probes found 0x18, 0x34 and 0x69. Initial diagnostics
+reported 84,764 bytes free internal RAM (largest block 43,008 bytes). The saved
+server URL and device identity remained present after about 11.7 hours powered
+on. The owner reports seeing the Wi-Fi setup information on the display.
+On 2026-11-07, USB provisioning joined the owner's home Wi-Fi (reported RSSI
+-54 dBm), reached the existing Hermes Gadget gateway and completed pairing.
+The device's own diagnostics confirmed **online, paired**. The server's
+built-in `hermes pairing approve gadget <request-id>` command approved the
+request identified as this Cardputer.
+
+The owner subsequently confirmed that keyboard/text entry and the G0 voice
+request/response flow work on this installed firmware. The owner also confirmed
+that Wi-Fi settings survive switching the device off and on. These are
+owner-reported functional checks, not instrumented audio-quality measurements
+or an exhaustive test of every key and shortcut. The owner also confirmed
+that the device remains usable after switching it off and on without another
+pairing approval; subsequent USB diagnostics confirmed it was still paired.
+
+The owner also confirmed readable text, correct display orientation and no
+visible cropping or color problems; text and voice requests with USB disconnected
+and the device powered by its battery; and screen off/on with Fn+Z followed by
+successful requests. This verifies basic battery operation, not battery endurance
+or a full discharge curve. Network-loss recovery testing was explicitly skipped
+at the owner's request and remains unverified.
+
+Phone provisioning, battery endurance and the rest of the physical checklist
+remain pending; retain experimental status. See the OTA report below for the
+separate update and recovery checks. Host tests cover
+key event decoding, modifiers, invalid FIFO events, bounded text entry and
+restoring the normal UI after editing. See the
+[physical checklist](hardware-validation.md#record-a-physical-test).
+
+### OTA and rollback report
+
+Tested on 2026-11-07 on the same K132-Adv / Stamp-S3A, powered by USB and
+connected to the existing Hermes gateway over Wi-Fi. The host retained a full
+8 MB backup privately before testing. The source was the port at `f7ef488`,
+based on upstream `648fbde`, plus the Cardputer-only OTA receive fix in
+`port_events.cpp`. Firmware reports `0.5.0-cadv-ota-f7ef488`; that version label
+identifies the base and is shared by the working and deliberately faulty test
+variants. Their ELF hashes distinguish the actual images.
+
+- **Reproduced failure:** two OTA attempts from the original installed 0.5.0
+  failed with `sequence: a chunk of the image went missing`. USB logs showed
+  `out of memory for a 4100 byte event`; one attempt used passive USB logging
+  without diagnostic polling. The existing firmware kept running. The sender's
+  64 KB window could exhaust internal RAM while the app task wrote to flash.
+- **Fix:** only on `CONFIG_HG_BOARD_CARDPUTER_ADV`, the ESP32 event bridge limits
+  outstanding firmware events to four, including the event being processed.
+  With the sender's 4 KB chunks this holds about 16 KB of queued payload. The
+  receive task waits for a slot, applying TCP backpressure; all allocation,
+  queue-failure and event-release paths return their slot. Waiting is bounded
+  to two seconds. The portable core and wire protocol are unchanged.
+- **Bootstrap:** the fix was first installed over USB as an app-only write at
+  `0x20000`, with flash hash verification. NVS, the partition table and OTA data
+  were not rewritten. The same identity, Wi-Fi and pairing remained usable.
+- **Successful OTA:** the corrected working image (1,601,616 bytes) then
+  installed over Wi-Fi from `ota_0` into `ota_1`. After reboot, diagnostics
+  identified ELF hash prefix `c5e63ff93ed374ba`, online and paired, with
+  `probation: false`; the log reported `kept the new firmware`.
+- **Rollback:** a second OTA installed a local variant in `ota_0` whose
+  `WsTransport::connect` logged `TEST ONLY` and returned without connecting.
+  Diagnostics identified the fault variant's ELF prefix `06879bf9648b52aa`,
+  Wi-Fi joined, Hermes connecting and `probation: true`. At uptime 300,372 ms
+  (five minutes after its updater started at 372 ms), the unmodified updater
+  logged that it was going back and rebooted without manual intervention.
+  Diagnostics then identified the working ELF `c5e63ff93ed374ba` in `ota_1`,
+  online and paired, with `probation: false`. Device identity, saved server and
+  Wi-Fi matched the pre-test state. No access-point or gateway outage was used.
+
+The working app's SHA-256 is
+`7d3b2fc9ee15b6cf3a0322132c9e09acad07407eef1c2e884e070664d9ab9a7f`.
+The fault-injection image's SHA-256 is
+`1d2a186af3bac48210ad5fce17b4b1f778cd5e6ed040c29d3d63589923c8b150`.
+The temporary fault injection is not part of the board profile or release
+sources. These checks do not establish battery endurance, network-loss recovery
+or complete physical verification.
+
+### Cardputer ADV review build recheck
+
+Following the maintainer's review, firmware sources at `ed4f99e` inherit the
+shared `platform = espressif32` instead of pinning a board-specific platform.
+A clean `pio run -e cardputer-adv -t clean` followed by
+`pio run -e cardputer-adv -j 2` succeeded with the resolved platform 8.0.0 and
+ESP-IDF 6.1.0. The standard build reports version `0.5.0`, with no temporary
+configuration or version override. Static RAM is 54,464 bytes; the application
+uses 1,601,199 of 2,031,616 slot bytes (21% headroom).
+
+The 1,601,616-byte app was installed by OTA on the same Cardputer on 2026-11-07.
+After reboot, live diagnostics identified ELF prefix `5718545567a38d7e` in
+`ota_0`, online and paired, Wi-Fi joined, and `probation: false`; the log reported
+`kept the new firmware`. ST7789, ES8311 microphone/speaker and the keyboard were
+initialized. The device identity and connection settings were retained.
+
+After this exact build was installed, the owner confirmed on 2026-11-07 that
+the display is readable and correctly oriented, physical keyboard entry with
+Backspace and Enter sends text successfully, and a G0 voice request captures
+speech and receives an audible spoken reply. These are owner-reported physical
+functional checks, separate from initialization diagnostics and host tests;
+they do not establish exhaustive key coverage or measured audio quality.
+
+App SHA-256:
+`979946abc4ed68fa18efcf6ffb0236196b9e4c855f4195e7419fa768c281603a`.
+The earlier reports retain their original firmware identities; the board stays
+experimental while the remaining full-checklist items are unverified.
+
+### Cardputer ADV receive ownership follow-up
+
+Review found that waiting for an OTA receive slot must not keep a borrowed
+pointer into the transport's shared reassembly buffer. The SDK uses a separate
+event loop for each WebSocket client, while closing the old client runs on the
+send task, so callbacks from a replacement client can overlap that wait.
+
+The Cardputer receive path now detaches a completed message into local owned
+storage before posting it. The payload remains valid throughout admission,
+and returning from the old callback does not clear a replacement client's
+partial frame. Host regression tests reuse/reallocate the shared buffer during
+delivery and exercise both successful and refused admission, including binary
+short frames. This protects the newly introduced waiting interval; it is not
+a claim that every pre-existing transport reconnect path was redesigned.
+
+These follow-up changes are checked in host tests and an ESP32 build only.
+The physical reports above describe their recorded images. The device now runs
+M5Launcher for separate experiments, so this newer Hermes receive change has
+not yet been installed or physically tested.

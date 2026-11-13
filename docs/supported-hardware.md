@@ -8,7 +8,12 @@ Hardware ports remain experimental until the [verification table](hardware-valid
 
 | Board | Controls | Audio |
 |---|---|---|
+| [M5Stack Cardputer ADV / Stamp-S3A](hardware.md#m5stack-cardputer-adv) | Hold G0 to talk; keyboard to type; Fn+Esc cancels; Fn+; / Fn+. scroll; Tab opens settings | Onboard ES8311 microphone and speaker. Experimental; ADV only |
 | [Waveshare ESP32-S3-LCD-1.54](hardware.md#waveshare-esp32-s3-lcd-154) | Hold BOOT to talk | Onboard microphones and speaker |
+| [Waveshare ESP32-S3-Touch-LCD-1.83](hardware.md#waveshare-esp32-s3-touch-lcd-183) | Hold the screen or BOOT to talk; PWR turns the screen off and on | Onboard microphones and speaker. Experimental |
+| [Waveshare ESP32-S3-Touch-LCD-1.46](hardware.md#waveshare-esp32-s3-touch-lcd-146) | Hold the screen or BOOT to talk | Onboard microphone and speaker. Experimental |
+| [Waveshare ESP32-S3-Touch-AMOLED-1.32](hardware.md#waveshare-esp32-s3-touch-amoled-132) | Hold the screen or BOOT to talk; PWR turns the screen off and on, and a hold powers off on battery | Onboard microphone and speaker. Experimental |
+| [Waveshare ESP32-S3-Touch-AMOLED-1.43C](hardware.md#waveshare-esp32-s3-touch-amoled-143c) | Hold the screen or BOOT to talk | Onboard microphones and speaker. Experimental |
 | [Waveshare ESP32-S3-Touch-AMOLED-1.75](hardware.md#esp32-s3-touch-amoled-175) | Hold the screen to talk; lay it face down to sleep (off by default) | Onboard microphones; speaker output |
 | [Waveshare ESP32-S3-Touch-AMOLED-1.75C](hardware.md#esp32-s3-touch-amoled-175c) | Hold the screen to talk; PWR turns the screen off and on | Onboard microphones and speaker |
 | [Waveshare ESP32-S3-Touch-AMOLED-1.8 (V2)](hardware.md#esp32-s3-touch-amoled-18) | Hold the screen or BOOT to talk; PWR cancels | Onboard analog microphone; speaker output |
@@ -20,8 +25,12 @@ Hardware ports remain experimental until the [verification table](hardware-valid
 | [Xorigin AIPI Lite](hardware.md#xorigin-aipi-lite) | Hold BOOT to talk; the power key cancels | Onboard microphone and speaker |
 | [Spotpear ESP32-S3-1.28-BOX](hardware.md#spotpear-esp32-s3-128-box) | Hold the screen or BOOT to talk; swipe down to cancel | Onboard microphone and speaker; battery |
 | [Spotpear ESP32-S3-1.54 muma](hardware.md#spotpear-esp32-s3-154-muma) | Hold the screen or BOOT to talk; swipe down to cancel | Onboard microphone and speaker |
+| [Espressif ESP32-S3-BOX](hardware.md#esp32-s3-box) | Hold the screen or BOOT to talk | Onboard microphones and speaker. Experimental |
+| [Espressif ESP32-S3-Korvo-2](hardware.md#esp32-s3-korvo-2) | Hold the screen to talk | Onboard microphones and speaker. Needs the LCD sub-board. Experimental |
+| [LCDWIKI ES3C28P](hardware.md#lcdwiki-es3c28p) | Hold the screen or BOOT to talk; swipe down to cancel | Onboard microphone; speaker output. Experimental |
 | [Espressif ESP32-S3-BOX-3](hardware.md#esp32-s3-box-3) | Hold the screen or BOOT to talk | Onboard microphones and speaker |
 | [M5Stack CoreS3](hardware.md#m5stack-cores3) | Hold the screen to talk | Onboard microphones and speaker; battery management |
+| [M5Stack StickS3](hardware.md#m5stack-sticks3) | Hold KEY1 to talk; KEY2 cancels; face-down sleep | Onboard microphone and speaker; battery. Experimental |
 | [LilyGO T-Display-S3](hardware.md#lilygo-t-display-s3) | BOOT and Button2; send text through the USB console | No onboard microphone or speaker |
 | [Elecrow CrowPanel 2.1-inch HMI](hardware.md#elecrow-crowpanel-21-inch-hmi) | Touch screen and rotary knob; send text through the USB console | No onboard microphone or speaker |
 | [Elecrow CrowPanel 5.0-inch HMI](hardware.md#elecrow-crowpanel-50-inch-hmi) | Touch screen; send text through the USB console | No onboard microphone or speaker |
@@ -38,6 +47,7 @@ Hardware ports remain experimental until the [verification table](hardware-valid
 | Board | Controls | Audio |
 |---|---|---|
 | [Elecrow CrowPanel Advanced 10.1-inch ESP32-P4](hardware.md#elecrow-crowpanel-advanced-101-inch-esp32-p4) | Hold the touch screen to talk; BOOT is configured as TALK | Onboard PDM microphone and I²S speaker output; STC8 battery/charger reporting |
+| [Waveshare ESP32-P4-WIFI6-Touch-LCD-7B](hardware.md#waveshare-esp32-p4-wifi6-touch-lcd-7b) | BOOT is configured as TALK; GT911 touch is configured but not yet validated | ES7210 microphone ADC and ES8311 speaker codec; optional OV5647 still capture is experimentally verified |
 | [Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C](hardware.md#waveshare-esp32-p4-wifi6-touch-lcd-34c) | Hold the touch screen to talk; BOOT is TALK. Touch and audio aren't verified on the board yet | ES7210 microphones and ES8311 speaker; USB power, no battery. Source build only; the C6 needs its own firmware first |
 
 Check the exact model and connections in [Hardware and wiring](hardware.md), then follow [Set up a board](setup-board.md). The browser installer lists profiles included in the latest published release. Newly merged profiles may need a [source build](development.md) until the next release.

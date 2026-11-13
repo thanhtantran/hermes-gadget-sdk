@@ -84,6 +84,10 @@ hermes gateway run
 
 `--link` falls back to copying where symlinks need extra privileges (Windows without Developer Mode). Re-run the install after editing in that case.
 
+The plugin's tab in the Hermes web dashboard is `plugin/dashboard/`. Its bundle, `dist/index.js`, is built from `src/index.jsx`: after editing the source, run `npm ci` once and then `npm run build:dashboard-tab` in `site/`, and commit both files. `npm test` there fails when they differ. Restart `hermes dashboard` after changing `plugin_api.py`; it mounts plugin routes only at startup. A changed bundle needs only a page reload.
+
+The Gadgets page in Hermes Desktop is `plugin/desktop/plugin.js`, built from `plugin/desktop-src/`: run `npm ci` once there, then `npm run build` after editing, and commit both. `npm test` there checks the protocol client. To see a change without reinstalling the plugin, copy the bundle to `~/.hermes/desktop-plugins/gadget/plugin.js` and reload the page.
+
 If your Hermes is a source checkout whose virtualenv Python differs from the Python Hermes's package manager prepares for plugins, `hermes plugins enable` can create an environment the gateway cannot import from. Adding `plugins: {enabled: [gadget]}` to `config.yaml` directly avoids that; the plugin has no Python dependencies of its own.
 
 ## Working on the firmware
@@ -122,7 +126,7 @@ On a board, open `hermes-gadget console --port <port>` and run the same commands
 
 | Command | Effect |
 |---|---|
-| `perf bench [scroll \| mascot \| redraw \| all]` | Draws a fixed workload, 120 updates each, one per app tick, with the device's own bars. `scroll` moves a 60-paragraph reply one line per update, `mascot` animates the talking mascot, and `redraw` repaints the whole screen every update. `all` runs the three in turn. The normal screen returns afterwards |
+| `perf bench [scroll \| mascot \| redraw \| all \| settings]` | Draws a fixed workload, 120 updates each, one per app tick, with the device's own bars. `scroll` moves a 60-paragraph reply one line per update, `mascot` animates the talking mascot, and `redraw` repaints the whole screen every update. `all` runs the three in turn. `settings` scrolls the settings list 3 pixels per text scale each update, down to the end and back, without opening the menu; `all` leaves it out. The normal screen returns afterwards |
 | `perf` | `@perf` JSON: the live statistics while timing is on, and the last bench under `bench` |
 | `perf on` / `perf off` | Time the device's own screen updates |
 | `perf reset` | Clear the live statistics |

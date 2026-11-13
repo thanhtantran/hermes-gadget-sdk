@@ -6,10 +6,15 @@ __pycache__/
 venv/
 .pytest_cache/
 dist/
+# The dashboard tab's bundle ships with the plugin (built from plugin/dashboard/src).
+!plugin/dashboard/dist/
 build/
 
 # Host (CMake) builds
 /build/
+
+# The Desktop page's build tools (its bundle, plugin/desktop/plugin.js, ships with the plugin)
+plugin/desktop-src/node_modules/
 
 # Installer site
 site/node_modules/

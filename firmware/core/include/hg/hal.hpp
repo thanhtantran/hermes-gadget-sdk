@@ -12,6 +12,8 @@
 #include <string>
 #include <string_view>
 
+#include "hg/camera.hpp"
+
 namespace hg {
 
 enum class LogLevel : uint8_t { Debug, Info, Warn, Error };
@@ -84,6 +86,9 @@ class AudioOut {
   virtual void abort() = 0;
   virtual bool busy() const = 0;
   virtual void set_volume(uint8_t percent) { (void)percent; }
+  // Bytes of mono PCM16 the playback buffer holds; 0 when unknown. The hello announces it as
+  // caps.speaker.buffer_ms, so the server may send further ahead on a jittery link.
+  virtual size_t buffer_bytes() const { return 0; }
 };
 
 // Decodes compressed speaker audio into mono PCM16. Optional: a device without
@@ -203,6 +208,7 @@ struct Hal {
   AudioDecoder* speaker_decoder = nullptr;  // optional compressed speaker audio
   Updater* updater = nullptr;
   Power* power = nullptr;
+  Camera* camera = nullptr;  // optional; only camera-capable boards set it
 };
 
 }  // namespace hg

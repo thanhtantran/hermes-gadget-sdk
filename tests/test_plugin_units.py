@@ -33,6 +33,32 @@ def test_a_latin1_device_keeps_its_accents_and_folds_the_rest():
     assert out == "¿Café \"quoted\" - it's 20°C, Ñandú? Lódz"
 
 
+def test_a_cjk_device_keeps_chinese_and_folds_the_rest():
+    out = textfmt.for_device("今天台中天氣晴朗，氣溫 28 度！“好”\U0001F600 café", "cjk")
+    assert out == '今天台中天氣晴朗，氣溫 28 度！"好" café'
+    # The other charsets still drop CJK.
+    assert textfmt.for_device("日本 ok", "latin1") == "ok"
+
+
+def test_a_latin1_cyrillic_device_keeps_russian_and_folds_the_rest():
+    out = textfmt.for_device("Привет, Ёжик! “Café” — 20°C \U0001F600 日本", "latin1-cyrillic")
+    assert out == 'Привет, Ёжик! "Café" - 20°C'
+    # Letters outside Russian are folded like any other script: dropped or to their base letter.
+    assert textfmt.for_device("Київ ok", "latin1-cyrillic") == "Кив ok"
+    # The other charsets still drop Cyrillic.
+    assert textfmt.for_device("Привет ok", "latin1") == "ok"
+
+
+def test_a_latin1_cyrillic_device_composes_decomposed_russian_letters():
+    # й and ё written as и/е plus a combining breve/diaeresis keep their marks.
+    decomposed = "\u0438\u0306 \u0435\u0308 \u0418\u0306 \u0415\u0308"
+    assert textfmt.for_device(decomposed, "latin1-cyrillic") == "й ё Й Ё"
+    assert textfmt.for_device("мо\u0438\u0306 ёж", "latin1-cyrillic") == "мой ёж"
+    # Decomposed Latin folds exactly as for "latin1" (the mark is dropped, not composed).
+    assert (textfmt.for_device("Cafe\u0301", "latin1-cyrillic")
+            == textfmt.for_device("Cafe\u0301", "latin1"))
+
+
 def test_a_latin1_device_gets_plain_spaces_and_no_soft_hyphens():
     assert textfmt.for_device("a\xa0b co\xadop\tx", "latin1") == "a b coop x"
 
@@ -365,6 +391,82 @@ def test_a_face_made_for_a_replaced_connection_is_dropped(tmp_path):
 
     old_sent, new_sent, held = asyncio.run(main())
     assert "face" not in old_sent and new_sent == ["face"] and held is not None
+
+
+class _DeviceSocket:
+    """A device's socket as DeviceHub._handle uses it: says hello, answers the challenge with the
+    device's key, and ends once closed. ``hangs`` makes its close never finish, like a connection
+    whose device rebooted: the close handshake waits on a peer that is gone."""
+
+    remote_address = ("127.0.0.1", 1)
+
+    def __init__(self, key, hangs=False):
+        from hermes_gadget_plugin import protocol
+
+        self.key, self.device_id, self.hangs = key, protocol.device_id_for_key(key), hangs
+        self.inbox, self.sent = asyncio.Queue(), []
+        self.inbox.put_nowait(json.dumps({"type": "hello", "proto": protocol.VERSION, "device_id": self.device_id,
+                                          "caps": {}}))
+
+    async def send(self, raw):
+        from hermes_gadget_plugin import protocol
+
+        msg = json.loads(raw)
+        self.sent.append(msg)
+        if msg["type"] == "challenge":
+            self.inbox.put_nowait(json.dumps({"type": "auth",
+                                              "mac": protocol.auth_mac(self.key, self.device_id, msg["nonce"])}))
+
+    async def recv(self):
+        return await self.inbox.get()
+
+    async def close(self, code=1000, reason=""):
+        if self.hangs:
+            await asyncio.Event().wait()
+        self.inbox.put_nowait(None)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raw = await self.inbox.get()
+        if raw is None:
+            raise StopAsyncIteration
+        return raw
+
+
+def test_a_reconnect_is_welcomed_without_waiting_for_the_old_connection_to_close(tmp_path):
+    """A device that rebooted connects again while its old connection still looks open. Closing the old
+    one waits on a peer that is gone; the new connection's welcome must not wait for it (it took seconds)."""
+    from hermes_gadget_plugin.hub import DeviceHub, HubDelegate
+
+    async def main():
+        key = bytes(range(32))
+        hub = DeviceHub(DeviceStore(tmp_path), HubDelegate())
+        old, new = _DeviceSocket(key, hangs=True), _DeviceSocket(key)
+        hub.store.enroll(old.device_id, key)
+        hub.store.confirm(old.device_id)
+        handlers = [asyncio.create_task(hub._handle(old))]
+        for _ in range(200):
+            if any(m["type"] == "welcome" for m in old.sent):
+                break
+            await asyncio.sleep(0.01)
+        handlers.append(asyncio.create_task(hub._handle(new)))
+        welcomed = False
+        for _ in range(100):  # 1 s, far more than a welcome takes
+            welcomed = any(m["type"] == "welcome" for m in new.sent)
+            if welcomed:
+                break
+            await asyncio.sleep(0.01)
+        current = hub.sessions[new.device_id]._ws is new
+        new.inbox.put_nowait(None)
+        await hub.stop()
+        for h in handlers:
+            h.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+        return welcomed, current
+
+    assert asyncio.run(main()) == (True, True)
 
 
 class _MediaWire(_Wire):

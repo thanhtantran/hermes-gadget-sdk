@@ -14,6 +14,10 @@ namespace {
 #define HG_BOARD_NAME "esp32s3-touch-amoled-1.75"
 #elif CONFIG_HG_BOARD_AMOLED_175C
 #define HG_BOARD_NAME "esp32s3-touch-amoled-1.75c"
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_AMOLED_132
+#define HG_BOARD_NAME "waveshare-esp32-s3-touch-amoled-1.32"
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_AMOLED_143C
+#define HG_BOARD_NAME "waveshare-esp32-s3-touch-amoled-1.43c"
 #elif CONFIG_HG_BOARD_AMOLED_18
 #define HG_BOARD_NAME "esp32s3-touch-amoled-1.8"
 #elif CONFIG_HG_BOARD_AMOLED_206
@@ -28,10 +32,22 @@ namespace {
 #define HG_BOARD_NAME "spotpear-esp32-s3-1.28-box"
 #elif CONFIG_HG_BOARD_BOX3
 #define HG_BOARD_NAME "esp32-s3-box-3"
+#elif CONFIG_HG_BOARD_ESP32S3_BOX
+#define HG_BOARD_NAME "esp32-s3-box"
+#elif CONFIG_HG_BOARD_ESP32S3_KORVO_2
+#define HG_BOARD_NAME "esp32-s3-korvo-2"
+#elif CONFIG_HG_BOARD_LCDWIKI_ES3C28P
+#define HG_BOARD_NAME "lcdwiki-es3c28p"
 #elif CONFIG_HG_BOARD_CORES3
 #define HG_BOARD_NAME "m5stack-cores3"
+#elif CONFIG_HG_BOARD_STICKS3
+#define HG_BOARD_NAME "m5stack-sticks3"
+#elif CONFIG_HG_BOARD_CARDPUTER_ADV
+#define HG_BOARD_NAME "cardputer-adv"
 #elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_LCD_185C_V2
 #define HG_BOARD_NAME "waveshare-esp32-s3-touch-lcd-1.85c-v2"
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_LCD_146
+#define HG_BOARD_NAME "esp32-s3-touch-lcd-146"
 #elif CONFIG_HG_BOARD_WS_KNOB_LCD_18
 #define HG_BOARD_NAME "waveshare-esp32s3-knob-touch-lcd-1.8"
 #elif CONFIG_HG_BOARD_ESP_VOCAT
@@ -46,8 +62,12 @@ namespace {
 #define HG_BOARD_NAME "crowpanel-advance-p4-10.1"
 #elif CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_3_4C
 #define HG_BOARD_NAME "waveshare-esp32-p4-touch-lcd-3.4c"
+#elif CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B
+#define HG_BOARD_NAME "waveshare-esp32-p4-wifi6-touch-lcd-7b"
 #elif CONFIG_HG_BOARD_WS_ESP32S3_LCD_154
 #define HG_BOARD_NAME "waveshare-esp32s3-lcd-154"
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_LCD_183
+#define HG_BOARD_NAME "waveshare-esp32-s3-touch-lcd-1.83"
 #elif CONFIG_HG_BOARD_ESP32_CYD
 #define HG_BOARD_NAME "esp32-2432s028-cyd"
 #else
@@ -143,6 +163,109 @@ BoardConfig make() {
   b.axp_audio_supply = true;  // ALDO1 supplies the analog audio circuit.
   b.codec.speaker_pa = true;  // the amplifier draws power only while sound plays
 #endif
+  return b;
+}
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_AMOLED_132
+// Waveshare ESP32-S3-Touch-AMOLED-1.32: ESP32-S3-PICO-1-N8R8, round 466x466
+// CO5300 over QSPI, CST820 touch, one ES8311 for the speaker and the microphone.
+// GPIO 18 held high keeps the battery latch on. No battery sense pin is named
+// in the sources used here.
+// Pins: docs/hardware.md#waveshare-esp32-s3-touch-amoled-132
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.amoled.enabled = true;
+  b.amoled.width = 466;
+  b.amoled.height = 466;
+  b.amoled.cs = 10;
+  b.amoled.sclk = 11;
+  b.amoled.d0 = 12;
+  b.amoled.d1 = 13;
+  b.amoled.d2 = 14;
+  b.amoled.d3 = 15;
+  b.amoled.rst = 8;
+  b.amoled.gap_x = 6;  // esp_lcd_panel_set_gap(panel, 0x06, 0)
+  b.amoled.qspi_mhz = 40;
+  b.amoled.round = true;
+  b.amoled.panel = AmoledPanel::Co5300_132;
+  b.i2c = {47, 48, 400000};
+  b.codec.enabled = true;
+  b.codec.mclk = 38;
+  b.codec.bclk = 39;
+  b.codec.ws = 41;
+  b.codec.dout = 42;
+  b.codec.din = 40;
+  b.codec.pa = 46;
+  b.codec.mic = MicCodec::Es8311;  // the same ES8311 is the microphone
+  b.touch.enabled = true;
+  b.touch.ppi = 353;  // estimate (see TouchConfig::ppi)
+  b.touch.controller = TouchController::Cst816;  // the CST820 sends the same report
+  b.touch.addr = 0x15;
+  b.touch.rst = 7;  // INT on GPIO 6; the CST816 driver polls
+  b.touch.width = 466;
+  b.touch.height = 466;
+  // GPIO 18 held high keeps the board powered from the battery. A short press
+  // on GPIO 17 turns the screen off and on. Holding it releases the latch.
+  b.latch_power = {true, -1, 18, -1};
+  b.latch_power.key = 17;
+  b.buttons = {0, -1, -1, -1};  // BOOT is TALK
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
+  return b;
+}
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_AMOLED_143C
+// Waveshare ESP32-S3-Touch-AMOLED-1.43C: ESP32-S3-PICO-1-N8R8, round 466x466
+// CO5300 over QSPI, CST820 touch, ES8311 speaker and ES7210 microphones.
+// GPIO 18 enables the codec LDO. It is not a battery latch. GPIO 4 reads the
+// cell through a divider of two, and GPIO 7 is low while charging.
+// Pins: docs/hardware.md#waveshare-esp32-s3-touch-amoled-143c
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.amoled.enabled = true;
+  b.amoled.width = 466;
+  b.amoled.height = 466;
+  b.amoled.cs = 15;
+  b.amoled.sclk = 14;
+  b.amoled.d0 = 9;
+  b.amoled.d1 = 10;
+  b.amoled.d2 = 11;
+  b.amoled.d3 = 12;
+  b.amoled.rst = 13;
+  b.amoled.gap_x = 8;  // esp_lcd_panel_set_gap(panel, 8, 0)
+  b.amoled.qspi_mhz = 40;
+  b.amoled.round = true;
+  b.amoled.panel = AmoledPanel::Co5300_143c;
+  b.i2c = {47, 48, 400000};
+  // Active-high LDO for the ES8311 and the ES7210, before either codec starts.
+  b.power_rails[0] = {18, true};
+  b.power_rails_settle_ms = 10;
+  b.codec.enabled = true;
+  b.codec.mclk = 38;
+  b.codec.bclk = 39;
+  b.codec.ws = 40;
+  b.codec.dout = 41;
+  b.codec.din = 42;
+  b.codec.pa = 46;
+  b.codec.mic = MicCodec::Es7210;
+  b.codec.es7210_mics = 0x03;  // MIC1 and MIC2. MIC3 is the playback reference and stays off.
+  b.touch.enabled = true;
+  b.touch.ppi = 326;  // estimate (see TouchConfig::ppi)
+  b.touch.controller = TouchController::Cst816;  // the CST820 sends the same report
+  b.touch.addr = 0x15;
+  b.touch.rst = 16;  // INT on GPIO 17; the CST816 driver polls
+  b.touch.width = 466;
+  b.touch.height = 466;
+  b.touch.mirror_x = true;  // the panel's MADCTL 0xC0 rotates the picture 180 degrees
+  b.touch.mirror_y = true;
+  // GPIO 4 is ADC1 channel 3. The example multiplies the calibrated millivolts
+  // by two. GPIO 7 is low while the ETA6098 is charging. There is no latch.
+  b.latch_power = {true, 4, -1, 7, -1, 2};
+  b.latch_power.power_off_supported = false;
+  b.latch_power.usb_external_power = true;
+  b.buttons = {0, -1, -1, -1};  // BOOT is TALK
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
   return b;
 }
 #elif CONFIG_HG_BOARD_AMOLED_18
@@ -242,6 +365,7 @@ BoardConfig make() {
   b.touch.width = 410;
   b.touch.height = 502;
   b.touch.offset_y = 8;     // touch reports glass rows; the UI starts at row 8
+  b.touch.int_wakes = true;  // its short report needs the CPU awake at once (light_sleep below)
   b.axp2101 = true;
   b.rtc.enabled = true;  // PCF85063 at 0x51 on the shared bus keeps UTC across power loss
   // PWR reaches only the AXP2101 (PWRON): its short press is read there. Holding it
@@ -250,8 +374,12 @@ BoardConfig make() {
   b.buttons = {0, -1, -1, -1};  // BOOT is TALK
   b.talk_label = "BOOT";
   b.cancel_label = "Swipe down";
-  // The FT3168's short INT pulse is not configured as a light-sleep wake
-  // source. Keep the CPU awake to read its report before it expires.
+  // Light sleep while dozing: the FT3168's INT (low level) wakes the CPU, and the touch
+  // task reads the report right after (TouchInput::arm_sleep_wake).
+  b.light_sleep = true;
+  // On battery the percent follows a discharge curve measured on the watch's cell;
+  // charging keeps the AXP2101's gauge (no charge curve).
+  b.battery_curve = hg::kAmoled206Curve;
   return b;
 }
 #elif CONFIG_HG_BOARD_AMOLED_216
@@ -344,6 +472,43 @@ BoardConfig make() {
   b.touch.addr = 0x15;
   b.touch.width = b.touch.height = 360;
   b.buttons = {0, -1, -1, -1};
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
+  return b;
+}
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_LCD_146
+// Waveshare ESP32-S3-Touch-LCD-1.46. The 1.46B and 1.46C share this pin table.
+// Round 412x412 SPD2010 over QSPI, SPD2010 touch, I2S microphone, PCM5101.
+// Pins: docs/hardware.md#waveshare-esp32-s3-touch-lcd-146.
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.controller = LcdController::Spd2010;
+  b.lcd.width = b.lcd.height = 412;
+  b.lcd.swap_xy = b.lcd.mirror_x = b.lcd.mirror_y = false;
+  b.lcd.invert = false;  // Espressif's QSPI example does not turn inversion on
+  b.lcd.round = true;
+  b.lcd.sclk = 40;
+  b.lcd.mosi = 46;
+  b.lcd.d1 = 45;
+  b.lcd.d2 = 42;
+  b.lcd.d3 = 41;
+  b.lcd.cs = 21;
+  b.lcd.backlight = 5;  // active high
+  b.lcd.spi_mhz = 20;   // Espressif's QSPI example. The factory header uses 80 MHz in mode 0.
+  b.i2c = {11, 10, 400000};
+  b.expander_reset.addr = 0x20;
+  b.expander_reset.mask = 0x03;  // EXIO1 touch reset is bit 0, EXIO2 LCD reset is bit 1
+  b.mic = {true, 15, 2, 39, false, true};  // SCK 15, WS 2, SD 39. Not PDM. L/R is tied to 3V3.
+  b.speaker = {true, 48, 38, 47};           // PCM5101 BCK 48, LRCK 38, DIN 47. No MCLK pin.
+  b.touch.enabled = true;
+  b.touch.ppi = 282;  // 412 px diameter / 1.46 in (see TouchConfig::ppi)
+  b.touch.controller = TouchController::Spd2010;
+  b.touch.addr = 0x53;
+  b.touch.int_gpio = 4;
+  b.touch.width = b.touch.height = 412;
+  b.buttons = {0, -1, -1, -1};  // wiki lists BOOT and does not print the GPIO
   b.talk_label = "BOOT";
   b.cancel_label = "Swipe down";
   return b;
@@ -441,6 +606,55 @@ BoardConfig make() {
   b.light_sleep = true;  // dozing on battery; keep_pins_through_sleep holds the latch and panel
   return b;
 }
+#elif CONFIG_HG_BOARD_WS_ESP32S3_TOUCH_LCD_183
+// Waveshare ESP32-S3-Touch-LCD-1.83 (SKUs 32790/32791): ESP32-S3R8, 16 MB flash,
+// 1.83" 240x284 ST7789P over SPI, CST816D touch on the codec I2C bus, ES8311
+// speaker and ES7210 microphones, AXP2101. The IMU, RTC and TF card stay off.
+// Pins: docs/hardware.md#waveshare-esp32-s3-touch-lcd-183
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.width = 240;
+  b.lcd.height = 284;
+  b.lcd.swap_xy = false;
+  b.lcd.mirror_x = false;
+  b.lcd.mirror_y = false;
+  b.lcd.invert = true;
+  b.lcd.gap_x = 0;
+  b.lcd.gap_y = 0;
+  b.lcd.mosi = 7;
+  b.lcd.sclk = 6;
+  b.lcd.cs = 5;
+  b.lcd.dc = 4;
+  b.lcd.rst = 38;
+  b.lcd.backlight = 40;
+  b.lcd.backlight_invert = false;
+  b.lcd.spi_mhz = 24;
+  b.i2c = {15, 14, 400000};
+  b.codec.enabled = true;
+  b.codec.mclk = 16;
+  b.codec.bclk = 9;
+  b.codec.ws = 45;
+  b.codec.dout = 8;
+  b.codec.din = 10;
+  b.codec.pa = 46;
+  b.touch.enabled = true;
+  b.touch.ppi = 203;  // estimate (see TouchConfig::ppi)
+  b.touch.controller = TouchController::Cst816;
+  b.touch.addr = 0x15;
+  b.touch.rst = 39;  // INT on GPIO 13; the CST816 driver polls
+  b.touch.width = 240;
+  b.touch.height = 284;
+  b.axp2101 = true;
+  b.axp_audio_supply = true;  // ALDO1 at 3.3 V supplies the microphone
+  // PWR reaches the AXP2101. A short press turns the screen off and on.
+  b.axp_power_key = true;
+  b.buttons = {0, -1, -1, -1};  // BOOT is TALK
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
+  return b;
+}
 #elif CONFIG_HG_BOARD_BOX3
 BoardConfig make() {
   BoardConfig b{};
@@ -473,6 +687,158 @@ BoardConfig make() {
   b.cancel_label = "Swipe down";
   return b;
 }
+#elif CONFIG_HG_BOARD_ESP32S3_BOX
+// Original ESP32-S3-BOX: 2.4" ST7789, TT21100, ES8311 + ES7210. 16 MB flash,
+// 8 MB octal PSRAM. Reset is active low and shared with touch. Backlight is
+// GPIO 45; I2S word select is GPIO 47. Mute (GPIO 1), the touch home button
+// and the ICM-42607-P stay unused.
+// Pins: docs/hardware.md#esp32-s3-box
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.controller = LcdController::St7789;
+  b.lcd.width = 320;
+  b.lcd.height = 240;
+  b.lcd.swap_xy = false;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = true;
+  b.lcd.invert = false;
+  b.lcd.bgr = true;
+  b.lcd.mosi = 6;
+  b.lcd.sclk = 7;
+  b.lcd.cs = 5;
+  b.lcd.dc = 4;
+  b.lcd.rst = 48;
+  b.lcd.backlight = 45;
+  b.lcd.spi_mhz = 40;
+  b.i2c = {8, 18, 400000};
+  b.codec = {true, 2, 17, 47, 15, 16, 46};
+  b.touch.enabled = true;
+  b.touch.ppi = 167;  // 320x240 across a 2.4 inch diagonal
+  b.touch.controller = TouchController::Box3;  // probe takes TT21100 at 0x24 and mirrors X
+  b.touch.int_gpio = 3;
+  b.touch.width = 320;
+  b.touch.height = 240;
+  b.buttons = {0, -1, -1, -1};  // BOOT is TALK. GPIO 1 is the hardware mute.
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
+  return b;
+}
+#elif CONFIG_HG_BOARD_ESP32S3_KORVO_2
+// ESP32-S3-Korvo-2 with the LCD sub-board: 2.4" ILI9341, GT911 or TT21100,
+// ES8311 + ES7210. 16 MB flash, 8 MB octal PSRAM. Chip select, reset, backlight
+// and the LCD/touch enable are TCA9554 outputs, not ESP32 GPIOs. ADC buttons,
+// the camera, the microSD card and the expander LEDs stay off. GPIO 0 is MOSI,
+// so BOOT is not a talk button.
+// Pins: docs/hardware.md#esp32-s3-korvo-2
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.controller = LcdController::Ili9341;
+  b.lcd.width = 320;
+  b.lcd.height = 240;
+  b.lcd.swap_xy = false;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = true;
+  b.lcd.invert = false;
+  b.lcd.bgr = true;
+  b.lcd.mosi = 0;
+  b.lcd.sclk = 1;
+  b.lcd.cs = -1;
+  b.lcd.dc = 2;
+  b.lcd.rst = -1;
+  b.lcd.backlight = -1;
+  b.lcd.spi_mhz = 40;
+  b.i2c = {17, 18, 400000};
+  b.codec = {true, 16, 9, 45, 8, 10, 48};
+  // Pin 3 (0x08) is LCD_EN and TOUCH_EN, active low. Pin 2 (0x04) is reset,
+  // active low. Pin 1 (0x02) is the backlight, active high, on or off only.
+  b.expander_levels.enabled = true;
+  b.expander_levels.low = 0x08;
+  b.expander_levels.reset = 0x04;
+  b.expander_levels.backlight = 0x02;
+  b.touch.enabled = true;
+  b.touch.ppi = 167;  // 320x240 across a 2.4 inch diagonal
+  b.touch.controller = TouchController::Box3;  // GT911 at 0x5d, else TT21100 at 0x24
+  b.touch.mirror_x = true;
+  b.touch.width = 320;
+  b.touch.height = 240;
+  b.buttons = {-1, -1, -1, -1};
+  b.talk_label = "Hold screen";
+  b.cancel_label = "Swipe down";
+  // GPIO 6 is ADC1 channel 5. The divider is 4. No charge pin and no latch.
+  b.latch_power = {true, 6, -1, -1, -1, 4};
+  b.latch_power.power_off_supported = false;
+  b.latch_power.usb_external_power = true;
+  return b;
+}
+#elif CONFIG_HG_BOARD_LCDWIKI_ES3C28P
+// LCDWIKI ES3C28P (QDtech): 2.8" 240x320 IPS ILI9341V over SPI, FT6336G touch,
+// one ES8311 for the speaker and the analog MEMS microphone. 16 MB QSPI flash,
+// 8 MB octal PSRAM. The touch, the codec and the I2C header share one bus.
+// Freenove's ESP32-S3 2.8" display uses the same pin map. The panel's reset is
+// CHIP_PU, shared with the ESP32-S3, so it has no GPIO. The RGB LED on GPIO 42
+// is an addressable part, not a plain GPIO LED, so it stays off.
+// Pins: docs/hardware.md#lcdwiki-es3c28p
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  // GPIO 1 enables the speaker amplifier, active low. CodecAudioConfig::pa is
+  // active high, so hold it low from boot as a rail: the amplifier stays on,
+  // as it does on boards whose pa goes through esp_codec_dev.
+  b.power_rails[0] = {1, false};
+  b.power_rails_settle_ms = 10;
+  // Portrait, so touch needs no axis swap (the FT5x06 path applies no swap or
+  // mirror). Upstream runs landscape with swap_xy alone, so the unflagged scan is
+  // a reflection: portrait needs mirror_x (the usual ILI9341 MX | BGR).
+  b.lcd.enabled = true;
+  b.lcd.controller = LcdController::Ili9341;
+  b.lcd.width = 240;
+  b.lcd.height = 320;
+  b.lcd.swap_xy = false;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = false;
+  b.lcd.invert = true;  // IPS glass; upstream inverts too
+  b.lcd.bgr = true;
+  b.lcd.mosi = 11;
+  b.lcd.sclk = 12;
+  b.lcd.cs = 10;
+  b.lcd.dc = 46;
+  b.lcd.rst = -1;
+  b.lcd.backlight = 45;
+  b.lcd.spi_mhz = 20;  // upstream's clock for this panel
+  b.i2c = {16, 15, 400000};
+  b.codec.enabled = true;
+  b.codec.mclk = 4;
+  b.codec.bclk = 5;
+  b.codec.ws = 7;
+  b.codec.dout = 8;
+  b.codec.din = 6;
+  b.codec.pa = -1;  // see power_rails above
+  b.codec.mic = MicCodec::Es8311;
+  // Measured on the board: at the default 24 dB, speech peaked near -40 dBFS
+  // (RMS about -53 dBFS) over a -78 dBFS floor, so a loopback was inaudible.
+  // 42 dB is the ES8311's top ADC scale step.
+  b.codec.mic_gain_db = 42.0f;
+  b.touch.enabled = true;
+  b.touch.controller = TouchController::Ft5x06;
+  b.touch.addr = 0x38;
+  b.touch.rst = 18;
+  b.touch.int_gpio = 17;
+  b.touch.width = 240;
+  b.touch.height = 320;
+  b.touch.ppi = 143;  // 240x320 across a 2.8 inch diagonal
+  b.buttons = {0, -1, -1, -1};  // BOOT
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
+  // GPIO 9 is ADC1 channel 8, behind a 200k/200k divider. No charge pin and no latch.
+  b.latch_power = {true, 9, -1, -1, -1, 2};
+  b.latch_power.power_off_supported = false;
+  b.latch_power.usb_external_power = true;
+  return b;
+}
 #elif CONFIG_HG_BOARD_CORES3
 BoardConfig make() {
   BoardConfig b{};
@@ -502,6 +868,50 @@ BoardConfig make() {
   b.touch.height = 240;
   b.talk_label = "Hold screen";
   b.cancel_label = "Swipe down";
+  return b;
+}
+#elif CONFIG_HG_BOARD_STICKS3
+// M5Stack StickS3: 1.14" 135x240 ST7789P3 used in landscape, one ES8311 doing
+// both directions on a duplex I2S bus, KEY1 (GPIO11) and KEY2 (GPIO12). The
+// M5PM1 on the internal I2C bus switches the LCD rail (its GPIO2) and the
+// AW8737 amplifier (its GPIO3), reads the battery and shuts down: StickS3Board.
+// A BMI270 at 0x68 gives face-down sleep.
+// Pins: docs.m5stack.com/en/core/StickS3, and M5GFX/M5Unified's StickS3 setup.
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.sticks3 = true;
+  b.i2c = {47, 48, 400000};
+  b.imu.enabled = true;
+  b.imu.chip = ImuChip::Bmi270;
+  b.imu.addr = 0x68;
+  b.lcd.enabled = true;
+  b.lcd.width = 240;
+  b.lcd.height = 135;
+  b.lcd.swap_xy = true;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = false;
+  b.lcd.invert = true;
+  // The ST7789's 240x320 RAM around the 135x240 glass, after the axis swap.
+  b.lcd.gap_x = 40;
+  b.lcd.gap_y = 53;
+  b.lcd.mosi = 39;
+  b.lcd.sclk = 40;
+  b.lcd.cs = 41;
+  b.lcd.dc = 45;
+  b.lcd.rst = 21;
+  b.lcd.backlight = 38;
+  b.codec.enabled = true;
+  b.codec.mclk = 18;
+  b.codec.bclk = 17;
+  b.codec.ws = 15;
+  b.codec.dout = 14;
+  b.codec.din = 16;
+  b.codec.mic = MicCodec::Es8311;
+  b.codec.dac_mclk = false;  // the vendor runs the ES8311 from BCLK
+  b.buttons = {11, 12, -1, -1};
+  b.talk_label = "KEY1";
+  b.cancel_label = "KEY2";
   return b;
 }
 #elif CONFIG_HG_BOARD_T_DISPLAY_S3
@@ -959,7 +1369,8 @@ BoardConfig make() {
   b.lcd.dsi.dpi_clock_mhz = 80;
   b.lcd.dsi.ldo_channel = 3;
   b.lcd.dsi.ldo_voltage_mv = 2500;
-  b.lcd.dsi.use_dma2d = true;
+  // CPU copies, not DMA2D: the configuration the 3.4C rev 1.3 booted and drew with (#292).
+  b.lcd.dsi.use_dma2d = false;
   b.lcd.dsi.hsync_pulse_width = 20;
   b.lcd.dsi.hsync_back_porch = 20;
   b.lcd.dsi.hsync_front_porch = 40;
@@ -984,16 +1395,118 @@ BoardConfig make() {
   b.codec.dout = 9;
   b.codec.din = 11;
   b.codec.pa = 53;
-  b.codec.speaker_pa = false;
+  b.codec.speaker_pa = true;   // port-driven PA so we can sequence mute before amp on/off (reduces speaker pop)
+  b.codec.dac_fade_ramp = true;  // the ES8311 ramps mute/unmute too
   b.codec.mic = MicCodec::Es7210;
   b.codec.speaker = SpeakerCodec::Es8311;
   b.codec.dac_mclk = true;
   b.codec.rmnm_mics = false;
   b.codec.es7210_mics = 0x03;
+  // microSD slot (SDIO 3.0, 4-bit): Waveshare's XC pinout.
+  b.sd = {true, 43, 44, 39, 40, 41, 42};
   // Wi-Fi via C6 over SDIO (standard P4 function board pins).
   b.buttons = {0, -1, -1, -1};
   b.talk_label = "BOOT";
   b.cancel_label = "Swipe down";
+  return b;
+}
+#elif CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B
+// Waveshare ESP32-P4-WIFI6-Touch-LCD-7B (SKU 32510): 1024x600 EK79007
+// MIPI-DSI panel, GT911 touch, ES8311 speaker + ES7210 microphone, C6 Wi-Fi.
+// Pin/timing data follows Waveshare's ESP-IDF BSP component 3.0.1.
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.width = 1024;
+  b.lcd.height = 600;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = true;
+  b.lcd.backlight = 32;
+  b.lcd.backlight_invert = true;
+  b.lcd.rst = 33;
+  b.lcd.bus.type = LcdBus::Type::Dsi;
+  b.lcd.dsi.controller = DsiController::Ek79007;
+  b.lcd.dsi.lanes = 2;
+  b.lcd.dsi.lane_bit_rate_mbps = 1000;
+  b.lcd.dsi.dpi_clock_mhz = 52;
+  b.lcd.dsi.ldo_channel = 3;
+  b.lcd.dsi.ldo_voltage_mv = 2500;
+  b.lcd.dsi.use_dma2d = true;
+  b.lcd.dsi.phy_clk_auto = true;
+  b.lcd.dsi.hsync_pulse_width = 10;
+  b.lcd.dsi.hsync_back_porch = 160;
+  b.lcd.dsi.hsync_front_porch = 160;
+  b.lcd.dsi.vsync_pulse_width = 1;
+  b.lcd.dsi.vsync_back_porch = 23;
+  b.lcd.dsi.vsync_front_porch = 12;
+  // Waveshare BSP I2C bus: SDA GPIO7, SCL GPIO8.
+  b.i2c = {7, 8, 400000};
+  b.touch.enabled = true;
+  b.touch.controller = TouchController::Gt911;
+  b.touch.width = 1024;
+  b.touch.height = 600;
+  // The DSI framebuffer is rotated 180° in software for this panel mounting;
+  // leave the GT911 axes unmirrored so touch coordinates stay aligned to pixels.
+  b.touch.mirror_x = false;
+  b.touch.mirror_y = false;
+  b.touch.ppi = 171;
+  // Waveshare BSP leaves GT911 reset and interrupt unconnected; poll the I2C bus.
+  b.codec.enabled = true;
+  b.codec.mclk = 13;
+  b.codec.bclk = 12;
+  b.codec.ws = 10;
+  b.codec.dout = 9;
+  b.codec.din = 11;
+  b.codec.pa = 53;
+  b.codec.speaker_pa = true;
+  b.codec.mic = MicCodec::Es7210;
+  b.codec.speaker = SpeakerCodec::Es8311;
+  b.codec.dac_mclk = true;
+  b.codec.rmnm_mics = false;
+  b.codec.es7210_mics = 0x03;
+  b.buttons = {0, -1, -1, -1};
+  b.talk_label = "BOOT";
+  b.cancel_label = "Swipe down";
+  return b;
+}
+#elif CONFIG_HG_BOARD_CARDPUTER_ADV
+// M5Stack K132-Adv / Stamp-S3A. Hardware facts and pinned vendor references:
+// docs/hardware.md#m5stack-cardputer-adv. No external PSRAM on ESP32-S3FN8.
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.width = 240;
+  b.lcd.height = 135;
+  b.lcd.swap_xy = true;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = false;
+  b.lcd.gap_x = 40;
+  b.lcd.gap_y = 53;
+  b.lcd.mosi = 35;
+  b.lcd.sclk = 36;
+  b.lcd.cs = 37;
+  b.lcd.dc = 34;
+  b.lcd.rst = 33;
+  b.lcd.backlight = 38;
+  b.i2c = {8, 9, 400000};
+  b.codec.enabled = true;
+  b.codec.mclk = -1;  // ES8311 derives its clock from BCLK
+  b.codec.bclk = 41;
+  b.codec.ws = 43;
+  b.codec.dout = 42;
+  b.codec.din = 46;
+  b.codec.dac_mclk = false;
+  b.codec.mic = MicCodec::Es8311;
+  b.codec.amp_supply_v = 3.3f;
+  b.latch_power.enabled = true;
+  b.latch_power.adc = 10;
+  b.latch_power.mv_ratio = 2;
+  b.latch_power.power_off_supported = false;  // mechanical switch
+  b.buttons = {0, -1, -1, -1};
+  b.talk_label = "G0";
+  b.cancel_label = "Fn+Esc";
   return b;
 }
 #elif CONFIG_HG_BOARD_CUSTOM

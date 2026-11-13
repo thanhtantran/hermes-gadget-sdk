@@ -30,6 +30,7 @@
 #include "soc/soc_caps.h"
 #include "esp_lcd_ek79007.h"
 #include "esp_lcd_jd9365.h"
+#include "esp_lcd_st7123.h"
 #include "esp_idf_version.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_ops.h"
@@ -315,7 +316,10 @@ bool DsiDisplay::begin(const LcdConfig& cfg, const DsiPanelConfig& dsi) {
   esp_lcd_dsi_bus_config_t bus_cfg = {};
   bus_cfg.bus_id = 0;
   bus_cfg.num_data_lanes = dsi_.lanes;
-  bus_cfg.phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT;
+  // DsiPanelConfig::phy_clk_auto leaves phy_clk_src at zero so ESP-IDF picks the source
+  // for the chip revision (XTAL on P4 rev 3.x, PLL_F20M before). The boards validated
+  // before it keep MIPI_DSI_PHY_CLK_SRC_DEFAULT.
+  if (!dsi_.phy_clk_auto) bus_cfg.phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT;
   bus_cfg.lane_bit_rate_mbps = static_cast<float>(dsi_.lane_bit_rate_mbps);
   esp_err_t err = esp_lcd_new_dsi_bus(&bus_cfg, &bus_);
   if (err != ESP_OK) {
@@ -358,7 +362,8 @@ bool DsiDisplay::begin(const LcdConfig& cfg, const DsiPanelConfig& dsi) {
   dpi.flags.use_dma2d = use_dma2d_ ? 1 : 0;
 #endif
 
-  // 5. The DSI panel driver. EK79007 (CrowPanel) or JD9365 (Waveshare 3.4C).
+  // 5. The DSI panel driver. EK79007 (CrowPanel), JD9365 (Waveshare 3.4C),
+  // or ST7123. No board selects the ST7123 yet.
   esp_lcd_panel_dev_config_t panel_cfg = {};
   panel_cfg.reset_gpio_num = (cfg.rst >= 0) ? static_cast<gpio_num_t>(cfg.rst) : GPIO_NUM_NC;
   panel_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
@@ -377,6 +382,18 @@ bool DsiDisplay::begin(const LcdConfig& cfg, const DsiPanelConfig& dsi) {
       return false;
     }
     controller_name_ = "jd9365-dsi";
+  } else if (dsi_.controller == DsiController::St7123) {
+    // NULL init_cmds selects the component's own default commands.
+    st7123_vendor_config_t vendor = {};
+    vendor.mipi_config.dsi_bus = bus_;
+    vendor.mipi_config.dpi_config = &dpi;
+    panel_cfg.vendor_config = &vendor;
+    err = esp_lcd_new_panel_st7123(io_, &panel_cfg, &panel_);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "ST7123 panel creation failed: %s", esp_err_to_name(err));
+      return false;
+    }
+    controller_name_ = "st7123-dsi";
   } else {
     ek79007_vendor_config_t vendor = {};
     vendor.mipi_config.dsi_bus = bus_;
@@ -410,6 +427,14 @@ bool DsiDisplay::begin(const LcdConfig& cfg, const DsiPanelConfig& dsi) {
     return false;
   }
   std::memset(fb_, 0, bytes);
+  if (cfg.mirror_x || cfg.mirror_y) {
+    transform_fb_ = static_cast<uint16_t*>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!transform_fb_) transform_fb_ = static_cast<uint16_t*>(heap_caps_malloc(bytes, MALLOC_CAP_8BIT));
+    if (!transform_fb_) {
+      ESP_LOGE(TAG, "no memory for mirrored %ux%u scanout buffer", cfg.width, cfg.height);
+      return false;
+    }
+  }
 
   if (use_dma2d_) {
     err = esp_lcd_dpi_panel_enable_dma2d(panel_);
@@ -489,12 +514,33 @@ bool DsiDisplay::wait_copy(uint32_t timeout_us) {
 
 void DsiDisplay::flush(uint16_t y0, uint16_t y1) {
   if (!panel_ || y0 >= y1) return;
-  // esp_lcd_panel_draw_bitmap() treats color_data as the first pixel of the
-  // sub-window [x0,y0)-(x1,y1), NOT the base of the full framebuffer. Passing
-  // fb_ would blit the top of the frame into every band, so the bottom band
-  // re-drew the top-bar rows (status text repeated down the screen). Offset
-  // the source by the starting row.
-  const esp_err_t err = esp_lcd_panel_draw_bitmap(panel_, 0, y0, cfg_.width, y1, &fb_[static_cast<size_t>(y0) * cfg_.width]);
+  // The EK79007's MADCTL mirror command can be ineffective on this panel. When
+  // board orientation flags are set, transform the source rows explicitly so
+  // the pixels arrive at the DPI scanout buffer in the intended orientation.
+  const uint16_t* source = &fb_[static_cast<size_t>(y0) * cfg_.width];
+  if (transform_fb_) {
+    // Mirrored vertically, the changed rows [y0, y1) land at [height - y1, height - y0).
+    if (cfg_.mirror_y) {
+      const uint16_t top = cfg_.height - y1;
+      y1 = cfg_.height - y0;
+      y0 = top;
+    }
+    for (uint16_t out_y = y0; out_y < y1; ++out_y) {
+      const uint16_t in_y = cfg_.mirror_y ? cfg_.height - 1 - out_y : out_y;
+      const uint16_t* src_row = &fb_[static_cast<size_t>(in_y) * cfg_.width];
+      uint16_t* dst_row = &transform_fb_[static_cast<size_t>(out_y) * cfg_.width];
+      if (cfg_.mirror_x) {
+        for (uint16_t out_x = 0; out_x < cfg_.width; ++out_x) {
+          dst_row[out_x] = src_row[cfg_.width - 1 - out_x];
+        }
+      } else {
+        std::copy_n(src_row, cfg_.width, dst_row);
+      }
+    }
+    source = &transform_fb_[static_cast<size_t>(y0) * cfg_.width];
+  }
+  // The source pointer is the first pixel of the sub-window [0,y0)-(width,y1).
+  const esp_err_t err = esp_lcd_panel_draw_bitmap(panel_, 0, y0, cfg_.width, y1, source);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "flush of rows %u..%u failed: %s", y0, y1, esp_err_to_name(err));
     return;

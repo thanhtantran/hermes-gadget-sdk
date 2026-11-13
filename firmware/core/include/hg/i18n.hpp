@@ -24,7 +24,7 @@ namespace hg::i18n {
 #define HG_I18N_MESSAGES(X) \
   /* Settings menu */ \
   X(Settings,               "Settings") \
-  X(SettingsHintTouch,      "Tap: change | Swipe: next") \
+  X(SettingsHintTouch,      "Tap: change | Drag: scroll") \
   X(SettingsHintButtons,    "{0}: change | {1}: next") \
   X(SpeakerVolume,          "Speaker volume") \
   X(ChangesSaved,           "Changes are saved.") \
@@ -35,6 +35,11 @@ namespace hg::i18n {
   X(NoMicDriver,            "No microphone driver is active.") \
   X(TalkModeHold,           "Hold to record; release to send.") \
   X(TalkModeTap,            "Tap to record; pause or tap to send.") \
+  X(TouchTalk,              "Touch to talk") \
+  X(TouchTalkOn,            "On\nTouch the screen to talk.") \
+  X(TouchTalkOff,           "Off\nTalk with {0}; touch only navigates.") \
+  X(TalkHold,               "Hold") \
+  X(TalkTap,                "Tap") \
   X(MicCheck,               "Microphone check") \
   X(MicCheckLive,           "Speak now. Level: {0}%\nLocal only. Nothing is sent.") \
   X(MicCheckIntro,          "Start to check the microphone level. No recording is saved or sent.") \
@@ -44,6 +49,12 @@ namespace hg::i18n {
   X(DisplayCheckIntro,      "Start to show red, green, blue, white and black bands.") \
   X(InputCheck,             "Input check") \
   X(InputCheckIntro,        "Start to check the controls. Cancel leaves this check.") \
+  X(Camera,                 "Camera") \
+  X(CameraIntro,            "Open the camera. Tap for a photo after a three-second countdown; tap again to retake. Swipe down to leave.") \
+  X(CameraTake,             "Tap to take a photo") \
+  X(CameraHoldStill,        "Hold still") \
+  X(CameraRetake,           "Tap to retake") \
+  X(CameraFailed,           "The camera didn't take a photo") \
   X(DeviceInfo,             "Device information") \
   X(DeviceInfoBody,         "{0}\nFirmware {1}\n{2}\nMicrophone: {3}\nSpeaker: {4}") \
   X(Available,              "available") \
@@ -70,6 +81,44 @@ namespace hg::i18n {
   X(ScreenTimeout,          "Screen timeout") \
   X(TimeoutSeconds,         "{0} seconds\nDims halfway; first input wakes.") \
   X(TimeoutAlwaysOn,        "Always on\nSelect to enable automatic dimming and screen sleep.") \
+  X(BatteryAlert,           "Low battery alert") \
+  X(BatteryAlertOff,        "Off\nSelect to light the screen when the battery runs low.") \
+  X(BatteryAlertAt,         "At {0}\nOn battery, the screen lights once at each.") \
+  X(BatteryAlertSound,      "Low battery sound") \
+  X(BatteryAlertSoundOn,    "On\nThe low battery alert beeps.") \
+  X(BatteryAlertSoundOff,   "Off\nThe low battery alert is silent.") \
+  X(ChargingNotice,         "Charging screen") \
+  X(ChargingNoticeOn,       "On\nPlugging in USB shows the battery level.") \
+  X(ChargingNoticeOff,      "Off\nPlugging in USB leaves the screen as it is.") \
+  X(ChargingSound,          "Charging sound") \
+  X(ChargingSoundOn,        "On\nPlugging in USB chirps.") \
+  X(ChargingSoundOff,       "Off\nPlugging in USB is silent.") \
+  X(ChargedNotice,          "Full battery screen") \
+  X(ChargedNoticeOn,        "On\nA full battery lights the screen once per charge.") \
+  X(ChargedNoticeOff,       "Off\nA full battery leaves the screen as it is.") \
+  X(ChargedSound,           "Full battery sound") \
+  X(ChargedSoundOn,         "On\nA full battery chimes once per charge.") \
+  X(ChargedSoundOff,        "Off\nA full battery is silent.") \
+  X(BatteryFull,            "Battery full") \
+  X(YouCanUnplug,           "You can unplug") \
+  X(WifiDeepSleep,          "Deep Wi-Fi sleep") \
+  X(WifiDeepSleepOn,        "On\nOn battery with the screen dark, Wi-Fi sleeps deeper.") \
+  X(WifiDeepSleepOff,       "Off\nFor a router that drops the gadget while it sleeps.") \
+  X(TouchWake,              "Touch wakes screen") \
+  X(TouchWakeOn,            "On\nA touch lights the dark screen.") \
+  X(TouchWakeOff,           "Off\nOnly a button lights the dark screen.") \
+  X(DoubleHome,             "Double press home") \
+  X(DoubleHomeOn,           "On\nPress {0} twice for Ready and the default profile.") \
+  X(DoubleHomeOff,          "Off\nTwo quick presses of {0} talk.") \
+  X(WakeTalk,               "Talk from dark screen") \
+  X(WakeTalkOn,             "On\n{0} lights the dark screen and records.") \
+  X(WakeTalkOff,            "Off\n{0} only lights the dark screen.") \
+  X(Animation,             "Animation") \
+  X(AnimationOn,            "On\nThe ring and the Updating screen move.") \
+  X(AnimationOff,           "Off\nThe ring and the Updating screen stand still.") \
+  X(SdLog,                  "SD card logging") \
+  X(SdLogOn,                "On\nThe log is copied to hermes.log on the microSD card.") \
+  X(SdLogOff,               "Off\nNothing is written to the microSD card.") \
   X(FaceDownSleep,          "Face-down sleep") \
   X(FaceDownSleepOn,        "On\nFace down, the screen sleeps and Hermes stays quiet.") \
   X(FaceDownSleepOff,       "Off\nSelect to sleep when the gadget lies face down.") \
@@ -164,6 +213,8 @@ namespace hg::i18n {
   X(Cancelled,              "Cancelled") \
   X(Sending,                "Sending...") \
   X(CouldntSendRecording,   "Couldn't send the recording") \
+  X(OfflineStillRecording,  "Offline, still recording") \
+  X(ReconnectingToSend,     "Reconnecting to send...") \
   X(NotConnected,           "Not connected to Hermes") \
   X(NewSessionIn,           "New session in {0}s") \
   X(NewSession,             "New session") \
@@ -197,6 +248,8 @@ namespace hg::i18n {
   X(SwipeDownForSessions,   "Swipe down for sessions") \
   X(ButtonShowsSessions,    "{0} shows sessions") \
   X(LowBattery,             "Low battery: connect USB") \
+  X(LowBatteryTitle,        "Low battery") \
+  X(ConnectUsbToCharge,     "Connect USB to charge") \
   /* Timers */ \
   X(TimerLeft,              "Timer {0}") \
   X(TimerDone,              "TIMER DONE") \
@@ -226,14 +279,14 @@ namespace hg::i18n {
   X(ProfileSetting,         "Hermes profile") \
   X(ProfileSettingNext,     "{0}\nSelect to switch to the next profile.") \
   X(ProfileSettingChoose,   "{0}\nSelect to choose a profile.") \
+  X(ProfileGridSetting,     "Profiles per page") \
+  X(ProfileGridValue,       "{0}\nSelect for another grid. A small screen shows fewer.") \
   X(ProfileCantSwitch,      "Can't switch now") \
   X(ProfileGreeting,        "Hi, I'm {0}") \
-  X(ProfileTapName,         "Tap name to change") \
+  X(ProfileSwipe,           "Swipe to change") \
   X(ProfileInSettings,      "Change in Settings") \
   X(ProfileListTitle,       "Talk to") \
   X(ProfileListHint,        "Swipe down to go back") \
-  X(ProfileListCurrent,     "NOW") \
-  X(ProfileListMore,        "More") \
   X(ProfileSwitching,       "Switching to {0}...") \
   X(ProfileSwitched,        "Now talking to {0}") \
   X(ProfileRefusedBusy,     "Finish this turn first") \

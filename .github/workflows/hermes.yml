@@ -8,6 +8,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # A draft stays up for review. This job starts when the pull request is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron: "37 5 * * *"
   workflow_dispatch:
@@ -32,6 +34,7 @@ env:
 jobs:
   integration:
     name: Plugin on Hermes (${{ github.event_name == 'schedule' && 'main' || inputs.hermes_ref || 'pinned' }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -46,7 +49,7 @@ jobs:
       - name: Show the Hermes commit under test
         working-directory: hermes-agent
         run: git log -1 --format='Hermes Agent %H (%cs) %s'
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: hermes-agent/uv.lock

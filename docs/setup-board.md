@@ -17,6 +17,9 @@ Have these ready:
 | [Waveshare ESP32-S3-Touch-AMOLED-1.75](hardware.md#esp32-s3-touch-amoled-175) | Hold the screen to talk, swipe down to cancel; microphones and a speaker output |
 | [Waveshare ESP32-S3-Touch-AMOLED-1.75C](hardware.md#esp32-s3-touch-amoled-175c) | Hold the screen to talk, swipe down to cancel; onboard microphones and speaker; experimental |
 | [Waveshare ESP32-S3-Touch-AMOLED-2.06](hardware.md#esp32-s3-touch-amoled-206) | Hold the screen or BOOT to talk, swipe down to cancel; onboard microphones and speaker; experimental |
+| [Espressif ESP32-S3-BOX](hardware.md#esp32-s3-box) | Hold the screen or BOOT to talk, swipe down to cancel; onboard microphones and speaker; experimental |
+| [Espressif ESP32-S3-Korvo-2](hardware.md#esp32-s3-korvo-2) | Hold the screen to talk, swipe down to cancel; onboard microphones and speaker; needs the LCD sub-board; experimental |
+| [LCDWIKI ES3C28P](hardware.md#lcdwiki-es3c28p) | Hold the screen or BOOT to talk, swipe down to cancel; onboard microphone and a speaker output; experimental; until a release includes it, [build it from source](hardware.md#lcdwiki-es3c28p) |
 | [Espressif ESP32-S3-BOX-3](hardware.md#esp32-s3-box-3) | Hold the screen or BOOT to talk, swipe down to cancel; onboard microphones and speaker; experimental |
 | [M5Stack CoreS3](hardware.md#m5stack-cores3) | Hold the screen to talk, swipe down to cancel; onboard audio and battery management; experimental |
 | [ESP32-S3 breadboard build](hardware.md) | Wire the display, microphone, buttons, and optional speaker first |
@@ -73,6 +76,6 @@ USB remains available if phone setup cannot connect. The console accepts `wifi-s
 
 Open **Troubleshooting** in the browser installer. Under **Something else**, choose **Save a diagnostics report**. Attach the file to a [bug report](https://github.com/Adolanium/hermes-gadget-sdk/issues).
 
-Taking the gadget away from home? See [Using Tailscale Funnel for remote access](tailscale-funnel.md): the funnel URL works as the Hermes address on any network, including a phone's personal hotspot.
+Taking the gadget away from home? See [Using Tailscale Funnel for remote access](tailscale-funnel.md): the funnel URL works as the Hermes address on any network, including a phone's personal hotspot. If Hermes is only reachable on your tailnet, firmware built with the experimental [tailnet support](tailnet.md) can join the tailnet itself.
 
 Next: [Talk, type, and interrupt](using-gadget.md) or [troubleshooting](troubleshooting.md).

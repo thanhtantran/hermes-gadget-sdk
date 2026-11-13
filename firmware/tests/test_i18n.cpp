@@ -130,7 +130,12 @@ TEST("i18n: folding to the font keeps Latin-1 and replaces the rest") {
   using hg::i18n::fold_to_font;
   CHECK_EQ(fold_to_font("¿Cómo estás? ¡Sí! Ñandú"), std::string("¿Cómo estás? ¡Sí! Ñandú"));
   CHECK_EQ(fold_to_font("“quoted” – it’s…"), std::string("\"quoted\" - it's..."));
+#if HG_CJK_FONT
+  // The CJK font has these two; the emoji it does not, and it stays one column.
+  CHECK_EQ(fold_to_font("日本 🙂"), std::string("日本 ?"));
+#else
   CHECK_EQ(fold_to_font("日本 🙂"), std::string("?? ?"));
+#endif
   CHECK_EQ(fold_to_font("a\xC3"), std::string("a?"));
   CHECK_EQ(fold_to_font("line\nbreak"), std::string("line\nbreak"));
 }
@@ -259,13 +264,14 @@ constexpr Msg kLines[] = {
     Msg::Cancelled, Msg::NewSessionIn, Msg::NewSession, Msg::MicUnavailable, Msg::AnsweredYes, Msg::AnsweredNo,
     Msg::PhonePaired, Msg::PhonePairingFailed, Msg::PhonePairingClosed, Msg::BluetoothUnavailable,
     Msg::WifiSetupUnavailable, Msg::ProfileListHint, Msg::ProfileCantSwitch, Msg::ProfileRefusedBusy,
-    Msg::ProfileRefusedUnknown, Msg::ProfileRefused,
+    Msg::ProfileRefusedUnknown, Msg::ProfileRefused, Msg::CameraTake, Msg::CameraHoldStill, Msg::CameraRetake,
+    Msg::CameraFailed,
     // hero headlines and one-line captions
     Msg::HiImHermes, Msg::AskMeAnything, Msg::UpShowsLastReply, Msg::SwipeDownForSessions,
-    Msg::ButtonShowsSessions, Msg::LowBattery, Msg::Listening, Msg::SpeakNowPause, Msg::LiftFingerToSend,
+    Msg::ButtonShowsSessions, Msg::LowBattery, Msg::Listening, Msg::SpeakNowPause, Msg::LiftFingerToSend, Msg::OfflineStillRecording, Msg::ReconnectingToSend,
     Msg::ReleaseToSend, Msg::Thinking, Msg::HermesAsks, Msg::Restarting, Msg::Updating, Msg::SetupNeeded,
     Msg::NoNetwork, Msg::Authenticating, Msg::ConnectingToHermes, Msg::PairingCode, Msg::PairThisDevice, Msg::RefusedByRoute,
-    Msg::ProfileTapName, Msg::ProfileInSettings,
+    Msg::ProfileSwipe, Msg::ProfileInSettings,
     Msg::TimerLeft, Msg::TapScreenToStop,
 };
 // A profile's greeting, in the name panel a touchscreen taps.
@@ -280,7 +286,7 @@ constexpr Msg kHeadlines[] = {
 constexpr Msg kButtons[] = {Msg::TapYes, Msg::ButtonYes, Msg::SwipeNo, Msg::ButtonNo};
 // Dashboard headings, and the session states shown as a row's value.
 constexpr Msg kDashHeadings[] = {Msg::HermesSessions, Msg::NoSessions, Msg::DashStatus};
-constexpr Msg kDashValues[] = {Msg::DashApproval, Msg::DashBusy, Msg::DashIdle, Msg::ProfileListCurrent};
+constexpr Msg kDashValues[] = {Msg::DashApproval, Msg::DashBusy, Msg::DashIdle};
 
 struct Panel {
   int w, h;
@@ -289,7 +295,7 @@ struct Panel {
 };
 // Every panel a board or simulator profile uses (the AMOLEDs as their UI area).
 constexpr Panel kPanels[] = {
-    {240, 135, false}, {320, 170, false}, {240, 240, false}, {240, 240, true}, {320, 240, false},
+    {240, 135, false}, {320, 170, false}, {240, 240, false}, {240, 240, true}, {240, 284, false}, {320, 240, false},
     {360, 360, true},  {368, 432, false}, {410, 486, false}, {466, 466, true}, {480, 320, false},
     {480, 480, false}, {800, 480, false},
     {480, 480, true},
@@ -374,6 +380,35 @@ TEST("font: every Latin-1 code point has its own glyph") {
   CHECK_EQ(std::string(hg::font::glyph(0x20AC)), question);  // €
   CHECK_EQ(std::string(hg::font::glyph(0x7F)), question);
   CHECK(!hg::font::drawable(0x0101));
+}
+
+TEST("font: every Russian letter has its own glyph") {
+  const std::string question(hg::font::glyph('?'));
+  std::set<std::string> seen;
+  std::vector<char32_t> letters;
+  for (char32_t cp = 0x410; cp <= 0x44F; ++cp) letters.push_back(cp);
+  letters.push_back(0x401);  // Ё
+  letters.push_back(0x451);  // ё
+  for (char32_t cp : letters) {
+    CHECK(hg::font::drawable(cp));
+    CHECK_EQ(hg::font::columns(cp), 1);
+    const std::string g(hg::font::glyph(cp));
+    CHECK_EQ(g.size(), size_t(hg::font::kGlyphWidth * hg::font::kGlyphHeight));
+    if (g == question) check::fail(__FILE__, __LINE__, "U+" + std::to_string(cp) + " draws as '?'");
+    if (!seen.insert(g).second) check::fail(__FILE__, __LINE__, "U+" + std::to_string(cp) + " repeats a glyph");
+  }
+  // Letters that look the same as Latin ones share the Latin glyph on purpose.
+  CHECK_EQ(std::string(hg::font::glyph(U'А')), std::string(hg::font::glyph(U'A')));
+  CHECK_EQ(std::string(hg::font::glyph(U'о')), std::string(hg::font::glyph(U'o')));
+  // The rest do not borrow a Latin shape.
+  CHECK(std::string(hg::font::glyph(U'И')) != hg::font::glyph(U'N'));
+  CHECK(std::string(hg::font::glyph(U'Я')) != hg::font::glyph(U'R'));
+  CHECK(std::string(hg::font::glyph(U'Й')) != hg::font::glyph(U'И'));
+  CHECK(std::string(hg::font::glyph(U'ё')) != hg::font::glyph(U'е'));
+  // Other Cyrillic (Ukrainian і, ї, є, Serbian ђ, ...) is outside the font.
+  CHECK(!hg::font::drawable(0x0456));
+  CHECK(!hg::font::drawable(0x0452));
+  CHECK_EQ(hg::font::length("Привет"), size_t(6));
 }
 
 TEST("font: UTF-8 reads one code point at a time and survives malformed input") {

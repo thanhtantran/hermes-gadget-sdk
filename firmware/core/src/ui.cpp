@@ -62,8 +62,8 @@ std::string fit(std::string_view s, int max_chars) {
 
 int cols_for(int width_px, int scale) { return width_px / (font::kCellWidth * scale); }
 
-// The edge arc's angles are integers: sine and cosine times kArcScale, so the per-pixel
-// test is a sign check and one cross product. The sweep is computed once per frame.
+// The edge ring's level arcs use integer angles: sine and cosine times kArcScale, so the
+// per-pixel test is a sign check and one cross product. The sweep is computed once per frame.
 constexpr int32_t kArcScale = 4096;
 constexpr double kTau = 6.28318530717958647692;
 
@@ -98,6 +98,108 @@ bool in_arc(int dx, int dy, const ArcSweep& s) {
 int isqrt(int64_t v) {
   int r = 0;
   while (static_cast<int64_t>(r + 1) * (r + 1) <= v) ++r;
+  return r;
+}
+
+// The edge ring's angles are in 1/64 degree: a whole turn, and the comet's tail.
+constexpr int32_t kTurn64 = 360 * 64;
+constexpr int32_t kTail64 = 70 * 64;
+// Listening turns amber in the last sixth of the recording limit: its last 5 of 30 s.
+constexpr int16_t kLateListening = 834;
+
+// The resting clock's burn-in shift: each minute the face moves (dx, dy) px, each -4 to 4,
+// through 9 places in a 9-minute cycle (draw_clock). The ring's ticks and seconds dot turn
+// with it by kTickTurn64 per px of dx: half a degree, so up to 2 degrees either way and
+// mostly a degree from one minute to the next (edge_ring).
+struct BurnInShift {
+  int dx, dy;
+};
+BurnInShift burn_in_shift(int minute) { return {(minute * 7) % 9 - 4, (minute * 5) % 9 - 4}; }
+constexpr int32_t kTickTurn64 = 32;
+
+// atan(n / d) for 0 <= n <= d, d > 0, in 1/64 degree: (pi/4) t + 0.273 t (1 - t) radians
+// for t = n / d, within a quarter of a degree.
+int32_t atan64(int32_t n, int32_t d) {
+  const int32_t t = (n << 14) / d;  // 0..16384
+  return (2880 * t + 1001 * ((t * (16384 - t)) >> 14)) >> 14;
+}
+
+// The angle of (dx, dy) from the centre, clockwise from 12 o'clock, in 1/64 degree:
+// [0, kTurn64). Integer arithmetic only, so every port draws the same ring.
+int32_t ring_angle64(int dx, int dy) {
+  const int32_t up = -dy, au = std::abs(up), ar = std::abs(dx);
+  if (!au && !ar) return 0;
+  const int32_t q = ar <= au ? atan64(ar, au) : 90 * 64 - atan64(au, ar);  // within the quadrant
+  if (dx >= 0) return up >= 0 ? q : 180 * 64 - q;
+  return up < 0 ? 180 * 64 + q : (kTurn64 - q) % kTurn64;
+}
+
+// An RGB565 colour's channels at 8 bits.
+void channels(uint16_t c, uint8_t out[3]) {
+  out[0] = static_cast<uint8_t>((((c >> 11) & 31) * 527 + 23) >> 6);
+  out[1] = static_cast<uint8_t>((((c >> 5) & 63) * 259 + 33) >> 6);
+  out[2] = static_cast<uint8_t>(((c & 31) * 527 + 23) >> 6);
+}
+
+// What a round panel's edge ring shows for this model; the first match wins. A recording or
+// an update takes the ring from a running timer, and the timer keeps it while Hermes thinks
+// or speaks. The alarm and the battery faces have none; the resting clock has its ticks,
+// turned with the face's burn-in shift. Comets lap the ring once per 24 frames (2.4 s at the
+// app's 10 frames a second), or 40 while Hermes speaks.
+EdgeRing edge_ring(const UiModel& m) {
+  EdgeRing r;
+  const auto level = [&r](int permille, uint16_t colour, uint16_t dim) {
+    r.kind = EdgeRing::Kind::Level;
+    r.permille = static_cast<int16_t>(std::clamp(permille, 0, 1000));
+    r.colour = colour;
+    r.dim = dim;
+  };
+  const auto comet = [&r, &m](uint32_t lap, uint16_t colour) {
+    r.kind = EdgeRing::Kind::Comet;
+    r.colour = colour;
+    r.head = static_cast<uint16_t>(m.frame % lap * 360 / lap);
+  };
+  switch (m.screen) {
+    case Screen::Alarm:
+    case Screen::LowBattery:
+    case Screen::Charging:
+    case Screen::Charged:
+      return r;
+    case Screen::Clock:
+      r.kind = EdgeRing::Kind::Ticks;
+      r.colour = kAccent;
+      r.second = static_cast<uint8_t>(m.clock_second % 60);
+      r.turn64 = static_cast<int16_t>(burn_in_shift(m.clock_minute).dx * kTickTurn64);
+      return r;
+    case Screen::Listening:
+      if (m.progress_permille >= 0) {
+        const bool late = m.progress_permille >= kLateListening;
+        level(m.progress_permille, late ? kAccent : kGreen, late ? kAccentDim : kGreenDim);
+        return r;
+      }
+      break;
+    case Screen::Updating:
+      if (m.progress_permille >= 0) {
+        level(m.progress_permille, kAccent, kAccentDim);
+        return r;
+      }
+      break;
+    default:
+      break;
+  }
+  if (m.timer_permille >= 0) {
+    level(m.timer_permille, kAccent, kAccentDim);
+    return r;
+  }
+  switch (m.screen) {
+    case Screen::Thinking: if (m.animate) comet(24, kBlue); break;
+    case Screen::Responding:
+      if (m.speaking && m.animate) comet(40, kAccent);
+      break;
+    case Screen::Boot:
+    case Screen::Connecting: if (m.animate) comet(24, kAccent); break;
+    default: break;
+  }
   return r;
 }
 
@@ -137,6 +239,8 @@ int tri(uint32_t frame, int period) {
 }
 
 mascot::Frame mascot_frame(const UiModel& m) {
+  // With animation off the Updating mascot never blinks, so the screen stands still.
+  if (m.screen == Screen::Updating && !m.animate) return mascot::Frame::Idle;
   mascot::Frame f = m.frame % 45 < 2 ? mascot::Frame::Blink : mascot::Frame::Idle;  // blink every ~4.5 s
   if (m.screen == Screen::Responding && m.speaking) f = (m.frame / 2) % 2 ? mascot::Frame::Talk : mascot::Frame::Idle;
   const bool still = m.face && m.face->rgb565 && !m.face->band(f).rows;  // a colour face without that frame
@@ -162,7 +266,11 @@ uint32_t hero_anim_key(const UiModel& m) {
     case Screen::Listening: h.val(m.frame % 3).val(m.level / 20); break;
     case Screen::Thinking:
     case Screen::Connecting:
-    case Screen::Updating: h.val((m.frame / 2) % 4); break;
+      h.val((m.frame / 2) % 4);
+      break;
+    case Screen::Updating:
+      if (m.animate) h.val((m.frame / 2) % 4);
+      break;
     case Screen::Responding: h.val((m.frame / 2) % 3); break;
     default: break;
   }
@@ -214,11 +322,15 @@ const char* screen_name(Screen s) {
     case Screen::Prompt: return "prompt";
     case Screen::Updating: return "updating";
     case Screen::Settings: return "settings";
+    case Screen::Camera: return "camera";
     case Screen::Setup: return "setup";
     case Screen::Dashboard: return "dashboard";
     case Screen::Profiles: return "profiles";
     case Screen::Alarm: return "alarm";
     case Screen::Clock: return "clock";
+    case Screen::LowBattery: return "low_battery";
+    case Screen::Charging: return "charging";
+    case Screen::Charged: return "charged";
   }
   return "unknown";
 }
@@ -258,28 +370,55 @@ Ui::Ui(Display& display)
   // The headline is centred, so keeping clear of the marker on the right costs the same on the left.
   layout_.name_cols = cols_for(2 * (name_marker_x() - s) - w, s);
   if (panel_.round) {
-    // The edge arc's band (draw_frame): a ring 2s + 2 px in from the glass, 3s + 2 px thick.
+    // The edge ring's band (draw_frame): a ring 2s + 2 px in from the glass, 3s + 2 px thick.
     const int R = std::min(panel_.width, panel_.height) / 2;
     band_out_ = R - (2 * s + 2);
     band_in_ = std::max(0, band_out_ - (3 * s + 2));
     const int cx = panel_.width / 2, cy = panel_.height / 2;
-    band_rows_.assign(static_cast<size_t>(panel_.height), BandRow{});
-    for (int y = 0; y < panel_.height; ++y) {
-      BandRow& row = band_rows_[static_cast<size_t>(y)];
-      const int dy = y - cy;
-      int run = -1;  // the run being filled: a row holds at most two
-      bool inside = false;
-      for (int x = 0; x < panel_.width; ++x) {
-        const int dx = x - cx, d2 = dx * dx + dy * dy;
-        const bool in = d2 <= band_out_ * band_out_ && d2 > band_in_ * band_in_;
-        if (in && !inside) {
-          run = std::min(run + 1, 1);
-          row.x0[run] = static_cast<int16_t>(x);
+    // Each row's runs (at most two) of the pixels `in` takes.
+    const auto runs = [&](std::vector<BandRow>& rows, auto in) {
+      rows.assign(static_cast<size_t>(panel_.height), BandRow{});
+      for (int y = 0; y < panel_.height; ++y) {
+        BandRow& row = rows[static_cast<size_t>(y)];
+        const int dy = y - cy;
+        int run = -1;  // the run being filled
+        bool inside = false;
+        for (int x = 0; x < panel_.width; ++x) {
+          const int dx = x - cx;
+          const bool here = in(dx * dx + dy * dy);
+          if (here && !inside) {
+            run = std::min(run + 1, 1);
+            row.x0[run] = static_cast<int16_t>(x);
+          }
+          if (here) row.x1[run] = static_cast<int16_t>(x + 1);
+          inside = here;
         }
-        if (in) row.x1[run] = static_cast<int16_t>(x + 1);
-        inside = in;
       }
+    };
+    runs(band_rows_, [&](int d2) { return d2 <= band_out_ * band_out_ && d2 > band_in_ * band_in_; });
+    // Each degree's rectangle of band pixels, by the angle ring_pixel reads (comet_box).
+    const RingBox none{static_cast<int16_t>(panel_.width), static_cast<int16_t>(panel_.height), 0, 0};
+    ring_degrees_.assign(360, none);
+    for (int y = 0; y < panel_.height; ++y) {
+      const BandRow& row = band_rows_[static_cast<size_t>(y)];
+      for (int run = 0; run < 2; ++run)
+        for (int x = row.x0[run]; x < row.x1[run]; ++x) {
+          RingBox& b = ring_degrees_[static_cast<size_t>(ring_angle64(x - cx, y - cy) / 64)];
+          b.x0 = std::min(b.x0, static_cast<int16_t>(x));
+          b.y0 = std::min(b.y0, static_cast<int16_t>(y));
+          b.x1 = std::max(b.x1, static_cast<int16_t>(x + 1));
+          b.y1 = std::max(b.y1, static_cast<int16_t>(y + 1));
+        }
     }
+    // The resting clock's ring takes the band and the seconds dot's reach, which is wider:
+    // radii within the dot's radius, 4s, of the band's middle, plus a pixel. In half pixels,
+    // so every bound is a whole number: the reach is 8s plus 2. Past the band, ring_pixel
+    // paints only the dot (or the background), so the ticks stay inside it.
+    const int mid2 = band_in_ + band_out_ + 1, reach2 = 8 * s + 2;
+    runs(clock_rows_, [&](int d2) {
+      return 4 * d2 >= (mid2 - reach2) * (mid2 - reach2) && 4 * d2 <= (mid2 + reach2) * (mid2 + reach2);
+    });
+    turn_ticks(0);  // the resting clock's ticks, until a minute turns them (set_ring)
   }
 }
 
@@ -326,7 +465,7 @@ void Ui::draw_bands(int y0, int y1, void (Ui::*draw)(Canvas&, const UiModel&), c
     if (banded && ox_) {
       // The rows go out full width, and this window last held other rows: put
       // back the background beside the UI square, which a whole-panel
-      // framebuffer keeps from the full repaint (push then paints the arc).
+      // framebuffer keeps from the full repaint (push then paints the ring).
       Canvas panel = panel_canvas();
       panel.fill_rect(0, a, ox_, b - a, bg_);
       panel.fill_rect(ox_ + info_.width, a, panel_.width - ox_ - info_.width, b - a, bg_);
@@ -338,7 +477,11 @@ void Ui::draw_bands(int y0, int y1, void (Ui::*draw)(Canvas&, const UiModel&), c
 }
 
 void Ui::push(int y0, int y1) {
-  if (band_.permille >= 0) paint_band(y0, y1);  // the arc goes over whatever these rows drew
+  paint_ring(y0, y1);  // the ring goes over whatever these rows drew
+  send(y0, y1);
+}
+
+void Ui::send(int y0, int y1) {
   if (!stats_) {
     display_.flush(static_cast<uint16_t>(y0), static_cast<uint16_t>(y1));
     return;
@@ -383,39 +526,58 @@ void Ui::draw_frame(const UiModel& m) {
   // A display that holds only a band of rows cannot resend rows it missed, so it
   // asks for the whole screen again rather than leave a stale band on the panel.
   if (display_.take_redraw_request()) valid_ = false;
+  // The edge ring (round panels). One that appears or goes repaints the panel once: without a
+  // ring the bands own its pixels in the UI square's corners. A banded framebuffer no longer
+  // holds the rows a change would resend, so any change repaints it. Otherwise only the
+  // band's pixels that changed go out, after whatever this frame draws (update_ring), and a
+  // comet's step computes only the pixels it lights where it was or where it is now.
+  const EdgeRing ring = panel_.round ? edge_ring(m) : EdgeRing{};
+  if ((ring.kind == EdgeRing::Kind::None) != (ring_.kind == EdgeRing::Kind::None)) valid_ = false;
+  if (ring != ring_ && display_.framebuffer_rows() > 0) valid_ = false;
+  bool ring_moved = valid_ && ring != ring_;
+  const RingBox moved = ring_moved && ring_.kind == EdgeRing::Kind::Comet && ring.kind == EdgeRing::Kind::Comet
+                            ? comet_box(ring_.head, ring.head)
+                            : RingBox{0, 0, static_cast<int16_t>(panel_.width), static_cast<int16_t>(panel_.height)};
+  // On the clock only the seconds dot moves from one second to the next: where it was. A new
+  // minute turns the ticks too, but then draw_clock repaints the whole panel, ring included
+  // (its hash keys on the minute), and the dot's rows hold nothing more to change.
+  const bool dot_moved = ring_moved && ring_.kind == EdgeRing::Kind::Ticks && ring.kind == EdgeRing::Kind::Ticks;
+  const int32_t dot_was = ring_dot_y16_;
+  set_ring(ring);
   if (m.screen == Screen::Alarm) {
     draw_alarm(m);
     return;
   }
   if (m.screen == Screen::Clock) {
-    draw_clock(m);
+    draw_clock(m);  // the face stays within a minute
+    if (dot_moved) {
+      // Only the rows of the dot's old and new places change: its radius, whole pixels,
+      // either side of each centre's row.
+      const int cy = panel_.height / 2, reach = isqrt(ring_dot_r2_) / 16;
+      const int32_t top = std::min(dot_was, ring_dot_y16_), bottom = std::max(dot_was, ring_dot_y16_);
+      update_ring({0, static_cast<int16_t>(cy + top / 16 - reach), static_cast<int16_t>(panel_.width),
+                   static_cast<int16_t>(cy + bottom / 16 + reach + 1)});
+    } else if (ring_moved) {
+      update_ring(moved);
+    }
+    return;
+  }
+  if (m.screen == Screen::LowBattery || m.screen == Screen::Charging || m.screen == Screen::Charged) {
+    draw_battery_face(m);
     return;
   }
   if (full_face_ != FullFace::None) {  // a face painted the whole panel: everything comes back
     full_face_ = FullFace::None;
     valid_ = false;
+    ring_moved = false;
   }
   const int h = info_.height;
-  // The edge arc (round panels) appears and goes with the timer; either repaints the panel once.
-  const bool arc = panel_.round && m.timer_permille >= 0;
-  if (arc != band_shown_) {
-    band_shown_ = arc;
-    valid_ = false;
-  }
-  const ArcSweep before = band_;
-  band_ = arc ? arc_sweep(m.timer_permille) : ArcSweep{};
-  const bool swept = valid_ && arc && before.permille >= 0 && before.permille != band_.permille;
-  // A banded framebuffer no longer holds the rest of the rows the sweep crossed,
-  // so it repaints the whole panel instead.
-  if (swept && display_.framebuffer_rows() > 0) valid_ = false;
   if (!valid_ && (ox_ || oy_)) {
     // Round panel: everything outside the UI area stays the background colour.
-    // Each push paints the arc too.
+    // Each push paints the ring too.
     each_window(0, panel_.height, [&](int, int) { panel_canvas().fill_rect(0, 0, panel_.width, panel_.height, bg_); });
   }
   if (panel_.round) draw_round_battery(m);
-  // Only the sweep moved: repaint the rows it crossed (the rest of the panel is unchanged).
-  if (swept && valid_) push_band_change(before, band_);
   const int y_header = layout_.top_h;
   const int y_content = y_header + layout_.header_h;
   const int y_bottom = h - layout_.bottom_h;
@@ -438,6 +600,13 @@ void Ui::draw_frame(const UiModel& m) {
   content.val(m.screen).add(m.detail).add(m.body).add(m.code).val(m.scroll).val(m.color_test)
       .val(m.qr ? m.qr->size : 0);
   for (const DashRow& row : m.dash) content.add(row.label).add(row.value).val(row.tone).val(row.heading);
+  if (m.screen == Screen::Settings) {
+    content.val(m.settings_sel).val(m.settings_scroll);
+    for (const SettingRow& row : m.settings) content.add(row.label).add(row.value).val(row.icon).val(row.kind).val(row.level);
+  }
+  if (m.screen == Screen::Profiles)
+    content.val(m.grid).val(m.face_row).val(m.mascot_row).val(m.settings_row).add(m.face ? m.face->hash : std::string())
+        .val(m.thumbs_rev).val(m.thumbs.size());
   hashes[2] = content.get();
   hashes[3] = Hash().add(m.hint).get();
 
@@ -464,6 +633,7 @@ void Ui::draw_frame(const UiModel& m) {
     hero_valid_ = true;
     hash_[1] = hash_[2] = 0;  // header and content must repaint when hero mode ends
     valid_ = true;
+    if (ring_moved) update_ring(moved);
     return;
   }
   hero_valid_ = false;
@@ -472,15 +642,23 @@ void Ui::draw_frame(const UiModel& m) {
     int y0, y1;
     void (Ui::*draw)(Canvas&, const UiModel&);
   };
+  // The Profiles grid owns the header's rows too: it draws them with the content.
+  const bool grid = m.screen == Screen::Profiles;
+  if (grid) hashes[1] = Hash().val(hashes[1]).val(hashes[2]).get();
   const Band bands[4] = {
       {0, y_header, &Ui::draw_top},
-      {y_header, y_content, &Ui::draw_header},
+      {y_header, grid ? y_bottom : y_content, grid ? &Ui::draw_profiles : &Ui::draw_header},
       {y_content, y_bottom, &Ui::draw_content},
       {y_bottom, h, &Ui::draw_bottom},
   };
   for (int i = 0; i < 4; ++i) {
-    // An image owns the area between the bars; the app draws and flushes it.
-    if (m.screen == Screen::Image && (i == 1 || i == 2)) {
+    if (grid && i == 2) {
+      hash_[i] = 0;
+      continue;
+    }
+    // An image owns the area between the bars; the app draws and flushes it. The
+    // camera screen does too (the port paints the live view there; see App::camera_draw).
+    if ((m.screen == Screen::Image || m.screen == Screen::Camera) && (i == 1 || i == 2)) {
       hash_[i] = 0;
       continue;
     }
@@ -489,6 +667,7 @@ void Ui::draw_frame(const UiModel& m) {
     hash_[i] = hashes[i];
   }
   valid_ = true;
+  if (ring_moved) update_ring(moved);
 }
 
 void Ui::draw_top(Canvas& c, const UiModel& m) {
@@ -539,16 +718,16 @@ void Ui::draw_top(Canvas& c, const UiModel& m) {
   c.text(pad, ty, fit(m.title, title_cols), s, kText);
 }
 
-// Round panels: the battery is centred at the very top of the panel, above the UI
-// square, as high as the circle leaves it room plus a small margin.
+// Round panels: the battery is centred at the top of the panel, above the UI square,
+// just below the edge ring's band plus a small margin, whether a ring shows or not.
 void Ui::draw_round_battery(const UiModel& m) {
   const int s = layout_.scale;
   const int bh = 7 * s;  // the taller of the icon (5s + 1) and the text (7s)
   const int hw = (m.battery >= 0 ? battery_width(m) : 0) / 2 + 2 * s;
-  // The glass centre's row, and the circle the strip's top corners must lie in: the glass
-  // edge, or while the arc shows, the band's inner edge (the strip starts below the arc).
+  // The glass centre's row, and the circle the strip's top corners must lie in: the band's
+  // inner edge, so the strip stays put as the ring comes and goes.
   const int half = panel_.width / 2;
-  const int radius = band_.permille >= 0 ? band_in_ : half;
+  const int radius = band_in_;
   int y0 = 0;
   // The first row where the strip's top corners lie inside that circle.
   while (y0 < oy_ && (half - y0) * (half - y0) + hw * hw > radius * radius) ++y0;
@@ -638,8 +817,14 @@ void Ui::draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r) {
   switch (m.screen) {
     case Screen::Boot:
     case Screen::Connecting:
-    case Screen::Updating:
       spinner(kAccent);
+      break;
+    case Screen::Updating:
+      if (m.animate) spinner(kAccent);
+      else {
+        c.ring(cx, cy, r, s + 1, kAccent);
+        c.fill_circle(cx, cy, r / 3, kAccentDim);
+      }
       break;
     case Screen::Thinking:
       spinner(kBlue);
@@ -689,11 +874,15 @@ void Ui::draw_indicator(Canvas& c, const UiModel& m, int cx, int cy, int r) {
       break;
     }
     case Screen::Image:
+    case Screen::Camera:  // the area between the bars belongs to the camera/App; see draw_frame
     case Screen::Settings:
     case Screen::Setup:
     case Screen::Profiles:
     case Screen::Alarm:
     case Screen::Clock:
+    case Screen::LowBattery:
+    case Screen::Charging:
+    case Screen::Charged:
       break;
   }
 }
@@ -747,8 +936,8 @@ void Ui::draw_content(Canvas& c, const UiModel& m) {
     draw_dashboard(c, m, y0, y1);
     return;
   }
-  if (m.screen == Screen::Profiles) {
-    draw_profiles(c, m);
+  if (m.screen == Screen::Settings && !m.settings.empty()) {
+    draw_settings(c, m, y0, y1);
     return;
   }
 
@@ -847,7 +1036,7 @@ void Ui::draw_dashboard(Canvas& c, const UiModel& m, int y0, int y1) {
 
 Ui::Rect Ui::name_rect(const UiModel& m) const {
   if (!m.name_target || !m.hero) return {};
-  const int s = layout_.scale, lh = Canvas::line_height(s);
+  const int s = layout_.scale;
   const HeroGeom g = hero_geom(m);
   // The headline and the cue under it, padded to a finger's height.
   return {2 * s, g.caption_y - s, info_.width - 4 * s, g.name_h};
@@ -860,52 +1049,403 @@ int Ui::name_marker_x() const {
 
 bool Ui::name_hit(const UiModel& m, int x, int y) const { return name_rect(m).has(x - ox_, y - oy_); }
 
-// Rows at least a finger tall. When they do not all fit, a page shows what does, starting at
-// item m.scroll, and its last row is More.
-Ui::ProfilePage Ui::profile_page(const UiModel& m) const {
-  ProfilePage p;
-  const int s = layout_.scale, y0 = layout_.top_h + layout_.header_h, y1 = info_.height - layout_.bottom_h;
-  const int n = static_cast<int>(m.dash.size()), band = y1 - y0 - 2 * s;
-  if (m.screen != Screen::Profiles || n == 0) return p;
-  const int fit = std::max(2, band / (std::max(touch_px_, Canvas::line_height(s) + 2 * s) + s));  // + the gap
-  p.more = n > fit;
-  p.first = p.more ? std::max(0, std::min(m.scroll, n - 1)) : 0;
-  p.count = p.more ? std::min(fit - 1, n - p.first) : n;
-  p.row = band / (p.more ? fit : std::max(n, std::min(4, fit)));
-  p.top = y0 + 2 * s;
-  return p;
+namespace {
+// An initial's colour, picked by the profile id so a profile keeps it on every board and page.
+uint16_t initial_color(std::string_view id) {
+  static constexpr uint16_t kColors[] = {rgb565(214, 90, 90),  rgb565(219, 129, 57), rgb565(176, 148, 40),
+                                         rgb565(76, 160, 90),  rgb565(48, 150, 160), rgb565(70, 120, 210),
+                                         rgb565(130, 100, 210), rgb565(200, 90, 160)};
+  uint32_t h = 2166136261u;  // FNV-1a
+  for (unsigned char ch : id) h = (h ^ ch) * 16777619u;
+  return kColors[h % (sizeof(kColors) / sizeof(kColors[0]))];
 }
 
-Ui::Rect Ui::ProfilePage::slot(const Ui& ui, int i) const {
-  const int s = ui.layout_.scale;
-  return {2 * s, top + i * row, ui.info_.width - 4 * s, row - s};
+// The first letter of a name, upper case when it is ASCII.
+// A gear in a size*size square at (x, y): eight teeth round a wheel with a hole, on a muted disc.
+void gear_icon(Canvas& c, int x, int y, int size) {
+  const int cx = x + size / 2, cy = y + size / 2;
+  c.fill_circle(cx, cy, size / 2, kFaint);
+  static constexpr int kDir[8][2] = {{1000, 0}, {707, 707}, {0, 1000}, {-707, 707},
+                                     {-1000, 0}, {-707, -707}, {0, -1000}, {707, -707}};
+  const int wheel = size * 26 / 100, tooth = std::max(2, size * 8 / 100), reach = size * 30 / 100;
+  for (const auto& d : kDir) c.fill_circle(cx + d[0] * reach / 1000, cy + d[1] * reach / 1000, tooth, kText);
+  c.fill_circle(cx, cy, wheel, kText);
+  c.fill_circle(cx, cy, std::max(2, size * 10 / 100), kFaint);
+}
+
+// `b` scaled to a size*size square by nearest pixel, its ink in `ink`.
+void bitmap_scaled(Canvas& c, int x, int y, int size, const mascot::Bitmap& b, uint16_t ink) {
+  if (size == b.size) {
+    c.bitmap1(x, y, size, size, b.bits, ink);
+    return;
+  }
+  for (int py = 0; py < size; ++py) {
+    const int sy = py * b.size / size;
+    for (int px = 0; px < size; ++px)
+      if (b.ink(px * b.size / size, sy)) c.pixel(x + px, y + py, ink);
+  }
+}
+
+// A name in at most two lines of `cols` characters; what does not fit ends the second line with "..".
+std::vector<std::string> name_lines(const std::string& name, int cols) {
+  std::vector<std::string> lines = wrap_text(name, cols);
+  if (lines.size() > 2) {
+    std::string rest = lines[1];
+    for (size_t i = 2; i < lines.size(); ++i) rest += " " + lines[i];
+    lines.resize(2);
+    lines[1] = fit(rest, cols);  // greedy wrapping left more than a line: fit() cuts it with ".."
+  }
+  return lines;
+}
+}  // namespace
+
+std::string profile_initial(std::string_view name) {
+  size_t start = 0;
+  while (start < name.size() && name[start] == ' ') ++start;
+  name.remove_prefix(start);
+  if (name.empty()) return "?";
+  const size_t n = std::max<size_t>(1, font::prefix(name, 1));
+  std::string out(name.substr(0, n));
+  const auto b0 = static_cast<unsigned char>(out[0]);
+  if (out.size() == 1 && b0 >= 'a' && b0 <= 'z') {
+    out[0] = static_cast<char>(b0 - 'a' + 'A');
+  } else if (out.size() == 2 && b0 == 0xC3) {  // Latin-1 small letters U+00E0..U+00FE, but not U+00F7
+    const auto b1 = static_cast<unsigned char>(out[1]);
+    if (b1 >= 0xA0 && b1 <= 0xBE && b1 != 0xB7) out[1] = static_cast<char>(b1 - 0x20);
+  }
+  return out;
+}
+
+// Cells at least a finger tall and wide, each with an icon and two lines of name under it. The page
+// holds the grid the model asks for, or with few profiles the smallest grid that holds them all
+// (bigger icons); a panel too small for it gets the largest smaller grid that fits.
+Ui::ProfileGrid Ui::profile_grid(const UiModel& m) const {
+  ProfileGrid g;
+  const int n = static_cast<int>(m.dash.size());
+  if (m.screen != Screen::Profiles || n == 0) return g;
+  const int s = layout_.scale, y0 = layout_.top_h, y1 = info_.height - layout_.bottom_h;
+  const int dots_h = 6 * s;
+  const int band_w = info_.width - 4 * s, band_h = y1 - y0 - dots_h - s;
+  const bool wide = band_w >= band_h;
+  const bool landscape = 2 * band_w >= 3 * band_h;  // clearly wider than tall: 6 is three across
+  const int min_icon = std::max(24, 12 * s);
+  static constexpr int kGrids[] = {16, 9, 6, 4, 2, 1};
+  int want = m.grid == 16 || m.grid == 6 || m.grid == 4 ? m.grid : 9;
+  for (int k : {4, 6, 9})  // few profiles: the smallest grid that holds them all
+    if (n <= k && k < want) want = k;
+  for (int k : kGrids) {
+    if (k > want) continue;
+    int cols = k == 16 ? 4 : k == 9 ? 3 : k == 6 ? (landscape ? 3 : 2) : k == 4 ? 2 : k == 2 ? (wide ? 2 : 1) : 1;
+    if (k == 4 && band_w >= 2 * band_h) cols = 4;  // a wide, short panel: one row of four
+    const int rows = (k + cols - 1) / cols;
+    const int cw = band_w / cols, ch = band_h / rows;
+    {  // names keep the screen's text size: a grid that needs smaller letters does not fit
+      const int ls = s;
+      const int icon = std::min(cw - 4 * s, ch - 2 * Canvas::line_height(ls) - 3 * s);
+      const bool ok = (cw >= touch_px_ && ch >= touch_px_ && icon >= min_icon && cols_for(cw - 4 * s, ls) >= 5) || k == 1;
+      if (!ok) continue;
+      g.cols = cols, g.rows = rows, g.cw = cw, g.ch = ch, g.label_scale = ls;
+      g.icon = std::max(8, icon);
+      g.x0 = (info_.width - cols * cw) / 2;
+      g.y0 = y0 + s;
+      g.dots_y = y1 - dots_h / 2;
+      const int per = cols * rows;
+      g.pages = (n + per - 1) / per;
+      g.first = std::max(0, std::min(m.scroll, n - 1)) / per * per;
+      g.count = std::min(per, n - g.first);
+      return g;
+    }
+  }
+  return g;
+}
+
+int Ui::profile_thumb_px(int cap) const {
+  UiModel m;
+  m.screen = Screen::Profiles;
+  m.grid = 4;
+  m.dash.resize(4);
+  return std::min(cap, profile_grid(m).icon);
+}
+
+int Ui::profile_per_page(const UiModel& m) const {
+  const ProfileGrid g = profile_grid(m);
+  return g.cols * g.rows;
 }
 
 int Ui::profile_row_hit(const UiModel& m, int x, int y) const {
-  const ProfilePage p = profile_page(m);
-  for (int i = 0; i < p.count + p.more; ++i)
-    if (p.slot(*this, i).has(x - ox_, y - oy_)) return i < p.count ? p.first + i : kMoreRow;
+  const ProfileGrid g = profile_grid(m);
+  for (int i = 0; i < g.count; ++i)
+    if (g.cell(i).has(x - ox_, y - oy_)) return g.first + i;
   return -1;
 }
 
-int Ui::profile_next_page(const UiModel& m) const {
-  const ProfilePage p = profile_page(m);
-  return p.first + p.count < static_cast<int>(m.dash.size()) ? p.first + p.count : 0;
+void Ui::draw_profiles(Canvas& c, const UiModel& m) {
+  const int s = layout_.scale;
+  c.fill_rect(0, layout_.top_h, info_.width, info_.height - layout_.bottom_h - layout_.top_h, bg_);
+  const ProfileGrid g = profile_grid(m);
+  const int ls = g.label_scale, lh = Canvas::line_height(ls), glyph_h = font::kGlyphHeight * ls;
+  for (int i = 0; i < g.count; ++i) {
+    const Rect r = g.cell(i);
+    const int item = g.first + i;
+    const DashRow& row = m.dash[static_cast<size_t>(item)];
+    const bool current = row.tone == DashRow::Tone::Waiting;
+    // A margin of two dots each side, so the names of cells side by side never touch.
+    const std::vector<std::string> lines = name_lines(row.label, cols_for(r.w - 4 * s, ls));
+    const int block = g.icon + 2 * s + static_cast<int>(lines.size()) * lh;
+    const int ix = r.x + (r.w - g.icon) / 2, iy = r.y + std::max(s, (r.h - block) / 2);
+    const int cx = ix + g.icon / 2, cy = iy + g.icon / 2;
+    const uint16_t* thumb =
+        static_cast<size_t>(item) < m.thumbs.size() && m.thumb_px ? m.thumbs[static_cast<size_t>(item)] : nullptr;
+    if (item == m.settings_row) {
+      gear_icon(c, ix, iy, g.icon);
+    } else if (item == m.face_row && m.face && m.face->rgb565) {
+      c.picture(ix, iy, g.icon, m.face->rgb565, m.face->px, nullptr, 0, 0);
+    } else if (thumb && item != m.face_row) {  // the profile's own face or avatar, from Hermes
+      c.picture(ix, iy, g.icon, thumb, m.thumb_px, nullptr, 0, 0);
+    } else if (item == m.face_row || item == m.mascot_row) {
+      const mascot::Face* face = item == m.face_row ? m.face : nullptr;
+      bitmap_scaled(c, ix, iy, g.icon, mascot::pick(g.icon, mascot::Frame::Idle, face), kText);
+    } else {
+      c.fill_circle(cx, cy, g.icon / 2, initial_color(row.value));
+      const std::string letter = profile_initial(row.label);
+      const int big = std::max(1, g.icon * 9 / 20 / font::kGlyphHeight);
+      c.text(cx - Canvas::text_width(letter, big) / 2, cy - font::kGlyphHeight * big / 2, letter, big, kText);
+    }
+    if (current) c.ring(cx, cy, g.icon / 2 + s + 1, std::max(2, s), kAccent);
+    int ty = iy + g.icon + 2 * s;
+    for (const std::string& line : lines) {
+      c.text(r.x + (r.w - Canvas::text_width(line, ls)) / 2, ty + (lh - glyph_h) / 2, line, ls, current ? kAccent : kText);
+      ty += lh;
+    }
+  }
+  if (g.pages > 1) {  // which page this is: one dot per page
+    const int dr = std::max(2, s + 1), step = 4 * dr, x = (info_.width - (g.pages - 1) * step) / 2;
+    for (int p = 0; p < g.pages; ++p)
+      c.fill_circle(x + p * step, g.dots_y, dr, p == g.first / (g.cols * g.rows) ? kAccent : kFaint);
+  }
 }
 
-void Ui::draw_profiles(Canvas& c, const UiModel& m) {
-  const int s = layout_.scale, glyph_h = font::kGlyphHeight * s;
-  const ProfilePage p = profile_page(m);
-  for (int i = 0; i < p.count + p.more; ++i) {
-    const Rect r = p.slot(*this, i);
-    const bool more = i == p.count;
-    const DashRow row = more ? DashRow{m.detail, ">"} : m.dash[static_cast<size_t>(p.first + i)];
-    c.fill_round_rect(r.x, r.y, r.w, r.h, 3 * s, kBar);
-    const int ty = r.y + (r.h - glyph_h) / 2, right = r.x + r.w - 3 * s;
-    const int value_w = Canvas::text_width(row.value, s);
-    c.text(right - value_w, ty, row.value, s, tone_color(row.tone));
-    c.text(r.x + 3 * s, ty, fit(row.label, cols_for(right - value_w - r.x - 5 * s, s)), s, more ? kDim : kText);
+// Settings icons: 8x8, one byte per row, most significant bit on the left, in
+// SettingRow::Icon order. Drawn at the text scale, so they match the font's pixels.
+constexpr uint8_t kSettingIcons[][8] = {
+    {0x08, 0x1A, 0xF1, 0xF5, 0xF5, 0xF1, 0x1A, 0x08},  // Volume
+    {0x10, 0x44, 0x38, 0xBA, 0x38, 0x44, 0x10, 0x00},  // Sun
+    {0x7E, 0x81, 0xA9, 0x81, 0x7E, 0x20, 0x40, 0x00},  // Talk
+    {0x18, 0x3C, 0x3C, 0x18, 0x00, 0x7E, 0xFF, 0xFF},  // Person
+    {0x18, 0x3C, 0x3C, 0x3C, 0xBD, 0x42, 0x3C, 0x18},  // Mic
+    {0x1E, 0x12, 0x12, 0x12, 0x76, 0xFF, 0x66, 0x00},  // Note
+    {0xFF, 0x81, 0x81, 0x81, 0xFF, 0x18, 0x7E, 0x00},  // Screen
+    {0x7E, 0x81, 0xA5, 0x81, 0x99, 0x81, 0x7E, 0x00},  // Keys
+    {0x3C, 0x42, 0x99, 0x81, 0x99, 0x99, 0x42, 0x3C},  // Info
+    {0x3C, 0x7E, 0x42, 0x42, 0x7E, 0x7E, 0x7E, 0x7E},  // Battery
+    {0xFF, 0x42, 0x24, 0x18, 0x18, 0x3C, 0x7E, 0xFF},  // Timer
+    {0x10, 0x28, 0x28, 0x2E, 0xEB, 0x80, 0x81, 0x7E},  // Touch
+    {0x3C, 0x46, 0x8C, 0x8C, 0x86, 0x42, 0x3C, 0x00},  // FaceDown
+    {0x3C, 0x52, 0x91, 0x9D, 0x81, 0x42, 0x3C, 0x00},  // Clock
+    {0x10, 0x54, 0x92, 0x92, 0x82, 0x44, 0x38, 0x00},  // Power
+    {0x00, 0x7E, 0x81, 0x3C, 0x42, 0x18, 0x18, 0x00},  // Wifi
+    {0x7C, 0x44, 0x44, 0x44, 0x44, 0x6C, 0x7C, 0x00},  // Phone
+    {0x3C, 0x5A, 0x99, 0xFF, 0x99, 0x5A, 0x3C, 0x00},  // Globe
+    {0x10, 0x20, 0x40, 0xFF, 0x40, 0x20, 0x10, 0x00},  // Back
+    {0x18, 0x3C, 0x7E, 0x7E, 0x7E, 0xFF, 0x00, 0x18},  // Bell
+    {0x0C, 0x18, 0x30, 0x7E, 0x0C, 0x18, 0x30, 0x00},  // Bolt
+    {0x00, 0x01, 0x03, 0x86, 0xCC, 0x78, 0x30, 0x00},  // Check
+    {0xDB, 0xDB, 0x00, 0xDB, 0xDB, 0x00, 0xDB, 0xDB},  // Grid
+    {0x18, 0x7E, 0x81, 0xBD, 0xA5, 0x81, 0x7E, 0x18},  // Camera
+};
+
+void draw_icon(Canvas& c, int x, int y, SettingRow::Icon icon, int scale, uint16_t color) {
+  const size_t i = static_cast<size_t>(icon);
+  if (i >= sizeof(kSettingIcons) / sizeof(kSettingIcons[0])) return;
+  for (int row = 0; row < 8; ++row) {
+    const uint8_t bits = kSettingIcons[i][row];
+    for (int col = 0; col < 8; ++col)
+      if ((bits >> (7 - col)) & 1) c.fill_rect(x + col * scale, y + row * scale, scale, scale, color);
   }
+}
+
+// The settings list: rows of a fixed height, except the selected one, which also
+// holds its description. Coordinates are relative to the list's top.
+int settings_row_base(int s, int touch_px) { return std::max(Canvas::line_height(s) + 6 * s, touch_px * 2 / 3); }
+
+// The columns a Value row's text gets at the right: what the label leaves, at least half the row.
+int settings_value_cols(const SettingRow& row, int row_cols) {
+  const int room = row_cols - static_cast<int>(font::length(row.label)) - 1;
+  return std::max(std::min(room, static_cast<int>(font::length(row.value))), row_cols / 2);
+}
+
+std::vector<std::string> Ui::settings_desc(const UiModel& m) const {
+  if (m.settings_sel < 0 || m.settings_sel >= static_cast<int>(m.settings.size())) return {};
+  const SettingRow& row = m.settings[static_cast<size_t>(m.settings_sel)];
+  const int s = layout_.scale;
+  std::string_view body = m.body;
+  // The value already shows at the right: drop the body's first line when it repeats it.
+  const size_t nl = body.find('\n');
+  // A slider's first line is its percentage, which may be a slide's preview. A value shortened
+  // to fit its row keeps its full line here (the row's width as drawn with a scroll bar).
+  const int row_cols = cols_for(info_.width - 15 * s - 7 * s, s);
+  const bool whole = static_cast<int>(font::length(row.value)) <= settings_value_cols(row, row_cols);
+  if (row.kind == SettingRow::Kind::Slider || (!row.value.empty() && whole && body.substr(0, nl) == row.value))
+    body = nl == std::string_view::npos ? "" : body.substr(nl + 1);
+  return wrap_text(std::string(body), cols_for(info_.width - 22 * s, s));  // the text column, beside a scroll bar
+}
+
+int Ui::settings_view_h() const { return info_.height - layout_.bottom_h - layout_.top_h - layout_.header_h; }
+
+int Ui::settings_row_h(const UiModel& m, int i) const {
+  const int s = layout_.scale, base = settings_row_base(s, touch_px_);
+  if (i != m.settings_sel) return base;
+  const int lines = static_cast<int>(settings_desc(m).size()) +
+                    (m.settings[static_cast<size_t>(i)].kind == SettingRow::Kind::Slider);
+  return base + (lines ? lines * Canvas::line_height(s) + 2 * s : 0);
+}
+
+int Ui::settings_row_top(const UiModel& m, int i) const {
+  const int s = layout_.scale, base = settings_row_base(s, touch_px_);
+  // Rows above the selected one are all the base height.
+  int top = 2 * s + i * (base + s);
+  if (i > m.settings_sel && m.settings_sel >= 0) top += settings_row_h(m, m.settings_sel) - base;
+  return top;
+}
+
+int Ui::settings_max_scroll(const UiModel& m) const {
+  const int n = static_cast<int>(m.settings.size());
+  if (n == 0) return 0;
+  return std::max(0, settings_row_top(m, n - 1) + settings_row_h(m, n - 1) + 2 * layout_.scale - settings_view_h());
+}
+
+int Ui::settings_scroll_for(const UiModel& m, int scroll) const {
+  if (m.settings_sel < 0 || m.settings_sel >= static_cast<int>(m.settings.size())) return 0;
+  const int s = layout_.scale, view = settings_view_h();
+  const int base = settings_row_base(s, touch_px_);
+  // The row and one more row of context each way, when there is room.
+  const int top = settings_row_top(m, m.settings_sel) - 2 * s - (m.settings_sel > 0 ? base / 2 : 0);
+  const int bottom = settings_row_top(m, m.settings_sel) + settings_row_h(m, m.settings_sel) + 2 * s +
+                     (m.settings_sel + 1 < static_cast<int>(m.settings.size()) ? base / 2 : 0);
+  if (bottom - scroll > view) scroll = bottom - view;
+  if (top < scroll) scroll = top;
+  const int max_scroll = settings_max_scroll(m);
+  if (scroll <= 0 || scroll >= max_scroll) return std::max(0, std::min(scroll, max_scroll));
+  // At rest the top row shows whole: round down the list to the next row's top.
+  // The selected row's own top is one, so it stays in view.
+  for (int i = 0; i < static_cast<int>(m.settings.size()); ++i) {
+    const int edge = settings_row_top(m, i) - 2 * s;
+    if (edge >= scroll) return std::min(edge, max_scroll);
+  }
+  return max_scroll;
+}
+
+int Ui::settings_row_hit(const UiModel& m, int x, int y) const {
+  x -= ox_;
+  y -= oy_ + layout_.top_h + layout_.header_h;
+  if (m.screen != Screen::Settings || x < 0 || x >= info_.width || y < 0 || y >= settings_view_h()) return -1;
+  y += m.settings_scroll;
+  for (int i = 0; i < static_cast<int>(m.settings.size()); ++i) {
+    const int top = settings_row_top(m, i);
+    if (y >= top && y < top + settings_row_h(m, i)) return i;
+  }
+  return -1;
+}
+
+// The selected slider row's bar, in area coordinates: x and w span it, y is its centre line.
+Ui::Rect Ui::settings_bar(const UiModel& m) const {
+  if (m.screen != Screen::Settings || m.settings_sel < 0 || m.settings_sel >= static_cast<int>(m.settings.size()) ||
+      m.settings[static_cast<size_t>(m.settings_sel)].kind != SettingRow::Kind::Slider)
+    return {};
+  const int s = layout_.scale, lh = Canvas::line_height(s), base = settings_row_base(s, touch_px_);
+  const int bar_w = settings_max_scroll(m) > 0 ? 3 * s : 0;
+  const int bx = 18 * s, right = info_.width - 7 * s - bar_w;  // inset 3s from the text columns (draw_settings)
+  const int top = layout_.top_h + layout_.header_h + settings_row_top(m, m.settings_sel) -
+                  std::max(0, std::min(m.settings_scroll, settings_max_scroll(m)));
+  return {bx, top + base - 2 * s + lh / 2, right - bx, 0};
+}
+
+int Ui::settings_slider_at(const UiModel& m, int x, int y, bool anywhere) const {
+  const Rect bar = settings_bar(m);
+  if (bar.w <= 0) return -1;
+  x -= ox_;
+  y -= oy_;
+  // A line's height around the bar, within the list's band; once a slide has begun, any height.
+  const int reach = Canvas::line_height(layout_.scale);
+  const int top = layout_.top_h + layout_.header_h, bottom = top + settings_view_h();
+  if (!anywhere && (bar.y < top || bar.y >= bottom || y < std::max(top, bar.y - reach) ||
+                    y > std::min(bottom - 1, bar.y + reach) || x < bar.x - reach || x >= bar.x + bar.w + reach))
+    return -1;
+  return std::max(0, std::min(100, (x - bar.x) * 100 / std::max(1, bar.w)));
+}
+
+void Ui::draw_settings(Canvas& c, const UiModel& m, int y0, int y1) {
+  const int s = layout_.scale, w = info_.width, lh = Canvas::line_height(s);
+  const int glyph_h = font::kGlyphHeight * s, base = settings_row_base(s, touch_px_);
+  const int max_scroll = settings_max_scroll(m);
+  const int scroll = std::max(0, std::min(m.settings_scroll, max_scroll));
+  const int bar_w = max_scroll > 0 ? 3 * s : 0;  // room for the scroll indicator
+  const int icon_x = 4 * s, text_x = icon_x + 11 * s, right = w - 4 * s - bar_w;
+  // Rows scrolled part way out of the band must not touch the bars around it.
+  const int clip0 = c.clip_y0(), clip1 = c.clip_y1();
+  c.set_clip_rows(std::max(clip0, y0), std::min(clip1, y1));
+  // Only the rows that cross the band; the rest cost nothing.
+  for (int i = 0; i < static_cast<int>(m.settings.size()); ++i) {
+    const int top = y0 + settings_row_top(m, i) - scroll, h = settings_row_h(m, i);
+    if (top >= y1) break;
+    if (top + h <= y0) continue;
+    const SettingRow& row = m.settings[static_cast<size_t>(i)];
+    const bool sel = i == m.settings_sel;
+    if (sel) c.fill_round_rect(2 * s, top, w - 4 * s - bar_w, h, 3 * s, kBar);
+    const int cy = top + base / 2;
+    draw_icon(c, icon_x, cy - 4 * s, row.icon, s, sel ? kAccent : kDim);
+    const int ty = cy - glyph_h / 2;
+    // The control at the right edge, then the label in what is left.
+    int ctrl_x = right;
+    switch (row.kind) {
+      case SettingRow::Kind::Toggle: {
+        const int ph = 8 * s, pw = 15 * s, on = row.level != 0;
+        ctrl_x = right - pw;
+        c.fill_round_rect(ctrl_x, cy - ph / 2, pw, ph, ph / 2, on ? kGreen : kFaint);
+        c.fill_circle(on ? right - ph / 2 : ctrl_x + ph / 2, cy, ph / 2 - s, on ? kText : kDim);
+        break;
+      }
+      case SettingRow::Kind::Slider:  // the percentage; the selected row draws its bar underneath
+        ctrl_x = right - Canvas::text_width(row.value, s);
+        c.text(ctrl_x, ty, row.value, s, sel ? kAccent : kDim);
+        break;
+      case SettingRow::Kind::Value: {
+        const std::string v = fit(row.value, settings_value_cols(row, cols_for(right - text_x, s)));
+        ctrl_x = right - Canvas::text_width(v, s);
+        c.text(ctrl_x, ty, v, s, sel ? kAccent : kDim);
+        break;
+      }
+      case SettingRow::Kind::Action:
+        ctrl_x = right - Canvas::text_width(">", s);
+        c.text(ctrl_x, ty, ">", s, sel ? kAccent : kFaint);
+        break;
+    }
+    c.text(text_x, ty, fit(row.label, cols_for(ctrl_x - 3 * s - text_x, s)), s, kText);
+    if (sel) {
+      int dy = top + base - 2 * s;
+      if (row.kind == SettingRow::Kind::Slider) {
+        const Rect bar = settings_bar(m);
+        const int bx = bar.x, bw = bar.w, by = bar.y;
+        const int fill = bw * std::min<int>(100, row.level) / 100;
+        c.fill_round_rect(bx, by - s, bw, 2 * s, s, kFaint);
+        if (fill > 0) c.fill_round_rect(bx, by - s, fill, 2 * s, s, kAccent);
+        c.fill_circle(bx + fill, by, 3 * s, kText);
+        dy += lh + s;
+      }
+      for (const std::string& line : settings_desc(m)) {
+        c.text(text_x, dy, line, s, kDim);
+        dy += lh;
+      }
+    }
+  }
+  if (max_scroll > 0) {
+    const int view = y1 - y0, total = view + max_scroll;
+    const int thumb_h = std::max(4 * s, view * view / total);
+    const int thumb_y = y0 + (view - thumb_h) * scroll / max_scroll;
+    c.fill_rect(w - 2 * s, y0, s, view, kFaint);
+    c.fill_rect(w - 2 * s, thumb_y, s, thumb_h, kDim);
+  }
+  c.set_clip_rows(clip0, clip1);
 }
 
 // A Wi-Fi setup code: a white panel with a four-module quiet zone, one square
@@ -1063,12 +1603,12 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
       c.arc(cx, cy, r, stroke, dir, col);
     }
   };
-  auto dots = [&](uint16_t on, uint16_t dim) {
+  auto dots = [&](uint16_t on, uint16_t dim, bool animate = true) {
     int r = std::max(2, size / 30);
     int gap = 3 * r;
     int tx = mx + size * a.head_top_right.x / 1000;
     int ty = my + size * a.head_top_right.y / 1000;
-    int active = static_cast<int>((m.frame / 2) % 4);
+    int active = animate ? static_cast<int>((m.frame / 2) % 4) : -1;
     for (int i = 0; i < 3; ++i) {
       c.fill_circle(tx + i * gap, ty - i * gap / 2, r, i == active ? on : dim);
     }
@@ -1088,8 +1628,8 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
       }
       break;
     case Screen::Thinking: dots(kBlue, kBlueDim); break;
-    case Screen::Connecting:
-    case Screen::Updating: dots(kAccent, kAccentDim); break;
+    case Screen::Connecting: dots(kAccent, kAccentDim); break;
+    case Screen::Updating: dots(kAccent, kAccentDim, m.animate); break;
     default: break;
   }
 
@@ -1129,38 +1669,153 @@ void Ui::draw_bottom(Canvas& c, const UiModel& m) {
   c.text((info_.width - Canvas::text_width(hint, s)) / 2, y0 + s, hint, s, kDim);
 }
 
-void Ui::paint_band(int y0, int y1) {
-  if (band_rows_.empty()) return;
-  Canvas panel = panel_canvas();  // push() runs inside the window that holds these rows
-  const int cx = panel_.width / 2, cy = panel_.height / 2;
-  for (int y = std::max(0, y0); y < std::min<int>(panel_.height, y1); ++y) {
-    const BandRow& row = band_rows_[static_cast<size_t>(y)];
-    for (int run = 0; run < 2; ++run) {
-      for (int x = row.x0[run]; x < row.x1[run]; ++x) {
-        panel.pixel(x, y, in_arc(x - cx, y - cy, band_) ? kAccent : kAccentDim);
-      }
+// What this frame's ring needs per pixel, worked out once: the level's sweep, the comet's
+// head and colours, the seconds dot's centre on the band's middle radius and its radius,
+// 4s px: about twice the band's width, so it stands out from the ticks. The dot turns with
+// the ticks, so it stays on the tick of its second.
+void Ui::set_ring(const EdgeRing& ring) {
+  ring_ = ring;
+  switch (ring.kind) {
+    case EdgeRing::Kind::Level:
+      ring_sweep_ = arc_sweep(ring.permille);
+      break;
+    case EdgeRing::Kind::Comet:
+      ring_head64_ = static_cast<int32_t>(ring.head % 360) * 64;
+      channels(ring.colour, ring_fg_);
+      channels(bg_, ring_bg_);
+      break;
+    case EdgeRing::Kind::Ticks: {
+      if (ring.turn64 != tick_turn64_) turn_ticks(ring.turn64);  // a new minute's shift
+      const double mid = (band_in_ + band_out_ + 1) / 2.0;
+      const double theta = kTau * (ring.second * 6 * 64 + ring.turn64) / kTurn64;
+      ring_dot_x16_ = static_cast<int32_t>(std::lround(mid * std::sin(theta) * 16));
+      ring_dot_y16_ = static_cast<int32_t>(std::lround(-mid * std::cos(theta) * 16));
+      const int32_t r16 = 64 * layout_.scale;
+      ring_dot_r2_ = r16 * r16;
+      break;
     }
+    case EdgeRing::Kind::None:
+      break;
   }
 }
 
-// Sends the panel rows the arc crossed when its end moved from `from` to `to`. The rows lie
-// between the two ends at both radii, widened to the top or bottom of the band when the
-// sweep passed those points.
-void Ui::push_band_change(const ArcSweep& from, const ArcSweep& to) {
-  const int cy = panel_.height / 2;
-  int lo = panel_.height, hi = 0;
-  for (const ArcSweep* s : {&from, &to}) {
-    for (int r : {band_in_, band_out_}) {
-      const int y = cy + static_cast<int>(static_cast<int64_t>(r) * s->ey / kArcScale);
-      lo = std::min(lo, y);
-      hi = std::max(hi, y + 1);
-    }
+// The 60 ticks' directions: every 6 degrees clockwise from 12 o'clock, turned by turn64.
+void Ui::turn_ticks(int32_t turn64) {
+  tick_turn64_ = turn64;
+  for (int k = 0; k < 60; ++k) {
+    const double theta = kTau * (k * 6 * 64 + turn64) / kTurn64;
+    tick_cos_[k] = static_cast<int16_t>(std::lround(std::cos(theta) * kArcScale));
+    tick_sin_[k] = static_cast<int16_t>(std::lround(std::sin(theta) * kArcScale));
   }
-  if (in_arc(0, -band_out_, from) != in_arc(0, -band_out_, to)) lo = std::min(lo, cy - band_out_);
-  if (in_arc(0, band_out_, from) != in_arc(0, band_out_, to)) hi = std::max(hi, cy + band_out_ + 1);
-  lo = std::max(0, lo - 1);
-  hi = std::min<int>(panel_.height, hi + 1);
-  if (lo < hi) push(lo, hi);
+}
+
+// The colour of the ring's pixel at (dx, dy) from the centre, for this frame's ring.
+uint16_t Ui::ring_pixel(int dx, int dy) const {
+  switch (ring_.kind) {
+    case EdgeRing::Kind::Level:
+      return in_arc(dx, dy, ring_sweep_) ? ring_.colour : ring_.dim;
+    case EdgeRing::Kind::Comet: {
+      // Whole at the head, fading as (1 - t / 70)^2 over the t degrees behind it, with a
+      // one-degree ramp ahead of it; blended over the background.
+      const int32_t behind = (ring_head64_ - ring_angle64(dx, dy) + kTurn64) % kTurn64;
+      int32_t a = 0;  // of 256
+      if (behind <= kTail64) {
+        const int32_t u = kTail64 - behind;
+        a = u * u / (kTail64 * kTail64 / 256);  // kTail64 squared is 256 * 78400
+      } else if (kTurn64 - behind < 64) {
+        a = (64 - (kTurn64 - behind)) * 4;
+      }
+      if (a <= 0) return bg_;
+      if (a >= 256) return ring_.colour;
+      const auto mix = [a](uint8_t f, uint8_t b) { return static_cast<uint8_t>((f * a + b * (256 - a) + 128) >> 8); };
+      return rgb565(mix(ring_fg_[0], ring_bg_[0]), mix(ring_fg_[1], ring_bg_[1]), mix(ring_fg_[2], ring_bg_[2]));
+    }
+    case EdgeRing::Kind::Ticks: {
+      const int32_t ex = dx * 16 - ring_dot_x16_, ey = dy * 16 - ring_dot_y16_;
+      if (ex * ex + ey * ey <= ring_dot_r2_) return ring_.colour;  // the seconds dot, over the ticks
+      const int32_t d2 = dx * dx + dy * dy;
+      if (d2 <= band_in_ * band_in_ || d2 > band_out_ * band_out_) return bg_;  // the dot's reach: only the dot
+      // The nearest tick, and the distance from its centre line (times kArcScale). The ticks
+      // are the date's grey, so they show at the clock's dimmed brightness; the dot alone is amber.
+      const int k = static_cast<int>((ring_angle64(dx, dy) - ring_.turn64 + kTurn64 + 192) / 384 % 60);
+      const int32_t d = std::abs(dx * tick_cos_[k] + dy * tick_sin_[k]);
+      const int s = layout_.scale;
+      if (k % 5 == 0) return d < (s + 1) * kArcScale ? kDim : bg_;  // the hours: 2s + 1 px, across the band
+      const int32_t mid2 = band_in_ + band_out_ + 1;  // twice the band's middle radius
+      return 4 * d2 > mid2 * mid2 && 2 * d <= s * kArcScale ? kDim : bg_;  // the minutes: thinner, its outer half
+    }
+    case EdgeRing::Kind::None:
+      break;
+  }
+  return bg_;
+}
+
+// The rows the ring owns: the band, or on the resting clock the band and the dot's reach.
+const std::vector<Ui::BandRow>& Ui::ring_rows() const {
+  return ring_.kind == EdgeRing::Kind::Ticks ? clock_rows_ : band_rows_;
+}
+
+// Paints the ring over panel rows [y0, y1) (push(), inside the window that holds them).
+void Ui::paint_ring(int y0, int y1) {
+  if (ring_.kind == EdgeRing::Kind::None || band_rows_.empty()) return;
+  Canvas panel = panel_canvas();
+  const int cx = panel_.width / 2, cy = panel_.height / 2;
+  const std::vector<BandRow>& rows = ring_rows();
+  for (int y = std::max(0, y0); y < std::min<int>(panel_.height, y1); ++y) {
+    const BandRow& row = rows[static_cast<size_t>(y)];
+    for (int run = 0; run < 2; ++run)
+      for (int x = row.x0[run]; x < row.x1[run]; ++x) panel.pixel(x, y, ring_pixel(x - cx, y - cy));
+  }
+}
+
+// The rectangle that holds every band pixel a comet lights with its head at `was` or at
+// `now`: ring_pixel lights the 70 degrees behind the head and the one ahead of it, so the
+// whole degrees from 70 behind each head to the head (ring_degrees_).
+Ui::RingBox Ui::comet_box(uint16_t was, uint16_t now) const {
+  RingBox box{static_cast<int16_t>(panel_.width), static_cast<int16_t>(panel_.height), 0, 0};
+  for (const uint16_t head : {was, now})
+    for (int back = 0; back <= kTail64 / 64; ++back) {
+      const RingBox& d = ring_degrees_[static_cast<size_t>((head % 360 + 360 - back) % 360)];
+      box.x0 = std::min(box.x0, d.x0);
+      box.y0 = std::min(box.y0, d.y0);
+      box.x1 = std::max(box.x1, d.x1);
+      box.y1 = std::max(box.y1, d.y1);
+    }
+  return box;
+}
+
+// Only the ring changed on a panel that stays: writes the ring's pixels inside `box` that
+// differ and sends their rows, changed rows at most 8 apart as one run. A framebuffer that
+// holds the whole panel only (draw_frame repaints a banded one).
+void Ui::update_ring(const RingBox& box) {
+  if (ring_.kind == EdgeRing::Kind::None || band_rows_.empty() || display_.framebuffer_rows() > 0) return;
+  uint16_t* fb = display_.framebuffer();
+  const int w = panel_.width, cx = w / 2, cy = panel_.height / 2;
+  const std::vector<BandRow>& rows = ring_rows();
+  int first = -1, last = -1;  // the run of changed rows not sent yet
+  for (int y = std::max<int>(0, box.y0); y < std::min<int>(panel_.height, box.y1); ++y) {
+    const BandRow& row = rows[static_cast<size_t>(y)];
+    uint16_t* line = fb + static_cast<size_t>(y) * static_cast<size_t>(w);
+    bool changed = false;
+    for (int run = 0; run < 2; ++run) {
+      const int x1 = std::min<int>(row.x1[run], box.x1);
+      for (int x = std::max<int>(row.x0[run], box.x0); x < x1; ++x) {
+        uint16_t c = ring_pixel(x - cx, y - cy);
+        if (panel_.swap_bytes) c = static_cast<uint16_t>((c >> 8) | (c << 8));
+        if (line[x] == c) continue;
+        line[x] = c;
+        changed = true;
+      }
+    }
+    if (!changed) continue;
+    if (first >= 0 && y - last > 8) {
+      send(first, last + 1);
+      first = -1;
+    }
+    if (first < 0) first = y;
+    last = y;
+  }
+  if (first >= 0) send(first, last + 1);
 }
 
 // TIMER DONE. The whole panel: green while `flash`, else the background. The hint sits in the
@@ -1169,8 +1824,7 @@ void Ui::push_band_change(const ArcSweep& from, const ArcSweep& to) {
 // the group is centred on the glass and kept clear of the hint. Round panels fit every line to
 // the chord at its own rows.
 void Ui::draw_alarm(const UiModel& m) {
-  band_ = ArcSweep{};  // no arc over the alarm
-  band_shown_ = false;
+  // No ring over the alarm (edge_ring): it owns the whole panel.
   const uint32_t key = Hash().val(m.flash).add(m.headline).add(m.detail).add(m.hint).val(m.lang)
                            .add(m.face ? m.face->hash : std::string()).get();
   if (valid_ && full_face_ == FullFace::Alarm && key == face_hash_) return;  // invalidate() repaints it too
@@ -1271,6 +1925,143 @@ void Ui::draw_alarm(const UiModel& m) {
   });
 }
 
+// The battery faces: the low battery alert (red, a "!"), plugging in (green, the level and
+// a bolt) and a full battery (green, full). The whole panel: a battery outline with its
+// terminal, the charge as a bar from the left, the mark in a gap cut out of the bar so the
+// icon reads by shape as well as colour; the percentage (`headline`) large below it, then
+// the one or two lines of `detail`. On a round panel the group keeps to the square inside
+// the glass. `face_battery` below 0 draws no bar, and an empty headline no percentage.
+void Ui::draw_battery_face(const UiModel& m) {
+  // No ring over the battery faces (edge_ring): they own the whole panel.
+  const uint32_t key = Hash().val(static_cast<int>(m.screen)).add(m.headline).add(m.detail).add(m.hint)
+                           .val(m.face_battery).val(m.lang).get();
+  if (valid_ && full_face_ == FullFace::Battery && key == face_hash_) return;
+  full_face_ = FullFace::Battery;
+  face_hash_ = key;
+  valid_ = true;  // leaving it repaints everything anyway (draw_frame)
+
+  enum class Mark { Alert, Bolt, None };
+  const Mark mark = m.screen == Screen::LowBattery ? Mark::Alert : m.screen == Screen::Charging ? Mark::Bolt : Mark::None;
+  const uint16_t ink = m.screen == Screen::LowBattery ? kRed : kGreen;
+
+  const int s = layout_.scale;
+  const int W = panel_.width, H = panel_.height;
+  const int cx = W / 2, cy = H / 2;
+  const int hy = oy_ + info_.height - layout_.bottom_h;  // the hint's band
+  // The box the group keeps to: the inscribed square on a round panel.
+  const int box_w = panel_.round ? W * 70 / 100 : W - 8 * s;
+  const int lo = panel_.round ? cy - box_w / 2 : 4 * s;
+  const int hi = panel_.round ? std::min(cy + box_w / 2, hy) : hy - 2 * s;
+
+  std::string line1 = m.detail, line2;
+  if (const size_t nl = m.detail.find('\n'); nl != std::string::npos) {
+    line1 = m.detail.substr(0, nl);
+    line2 = m.detail.substr(nl + 1);
+  }
+  const int ls1 = s + 1, ls2 = s;  // the first line a step above the base scale, the second at it
+  const int gap = 5 * s;
+  const int text_h = Canvas::line_height(ls1) + (line2.empty() ? 0 : Canvas::line_height(ls2));
+  const bool number = !m.headline.empty();
+
+  // The largest percentage scale, and the icon sized from the box, that fit the box's height.
+  int ps = 1, iw = 0, ih = 0;
+  auto group_h = [&](int k, int h) { return h + gap + (number ? Canvas::line_height(k) + gap : 0) + text_h; };
+  for (int k = 12; k >= 1; --k) {
+    if (number && Canvas::text_width(m.headline, k) > box_w * 3 / 4) continue;
+    const int w = std::min(box_w * 3 / 4, (hi - lo) * 9 / 10);
+    if (group_h(k, w * 9 / 20) <= hi - lo || k == 1 || !number) {
+      ps = k;
+      iw = w;
+      ih = iw * 9 / 20;
+      while (iw > 16 && group_h(k, ih) > hi - lo) {  // shrink the icon until the group fits
+        iw = iw * 9 / 10;
+        ih = iw * 9 / 20;
+      }
+      break;
+    }
+  }
+  const int ph = number ? Canvas::line_height(ps) : 0;
+  const int group = group_h(ps, ih);
+  const int top = std::clamp(cy - group / 2, lo, std::max(lo, hi - group));
+
+  each_window(0, H, [&](int, int) {
+    Canvas panel = panel_canvas();
+    panel.fill_rect(0, 0, W, H, bg_);
+
+    // The icon: an outline (stroke t), the terminal on the right, the charge bar inside.
+    const int t = std::max(2, iw / 22);
+    const int nub_w = std::max(2, iw / 14), nub_h = ih * 2 / 5;
+    const int body_w = iw - nub_w;
+    const int x0 = cx - iw / 2, y0 = top;
+    const int r = std::max(1, ih / 6);
+    panel.fill_round_rect(x0, y0, body_w, ih, r, ink);
+    panel.fill_round_rect(x0 + t, y0 + t, body_w - 2 * t, ih - 2 * t, std::max(1, r - t), bg_);
+    panel.fill_rect(x0 + body_w, y0 + (ih - nub_h) / 2, nub_w, nub_h, ink);
+    const int pad = std::max(1, t);
+    const int in_x = x0 + t + pad, in_y = y0 + t + pad, in_w = body_w - 2 * (t + pad), in_h = ih - 2 * (t + pad);
+    if (m.face_battery >= 0)
+      panel.fill_rect(in_x, in_y, std::max(t, in_w * std::min<int>(m.face_battery, 100) / 100), in_h, ink);
+    const int mid = x0 + body_w / 2;
+    if (mark == Mark::Alert) {
+      // A stem and a dot, in a gap cut out of the bar.
+      const int ex_w = std::max(2, in_h / 5), stem_h = in_h * 11 / 20, dot_h = ex_w;
+      const int ex_x = mid - ex_w / 2;
+      const int ex_y = in_y + (in_h - (stem_h + ex_w / 2 + dot_h)) / 2;
+      panel.fill_rect(ex_x - pad, in_y, ex_w + 2 * pad, in_h, bg_);
+      panel.fill_rect(ex_x, ex_y, ex_w, stem_h, ink);
+      panel.fill_rect(ex_x, ex_y + stem_h + ex_w / 2, ex_w, dot_h, ink);
+    } else if (mark == Mark::Bolt) {
+      // A lightning bolt, row by row: a band falling to the left, a crossbar, a band falling
+      // to a point. Drawn grown by `pad` in the background first, then in the text colour.
+      const int bh = in_h * 9 / 10, bw = bh * 4 / 5;
+      const int by = in_y + (in_h - bh) / 2;
+      auto bolt = [&](int grow, uint16_t col) {
+        for (int row = -grow; row < bh + grow; ++row) {
+          const int q = std::clamp(row, 0, bh - 1) * 1000 / std::max(1, bh - 1);  // 0..1000 down the bolt
+          int xa, xb;
+          if (q < 450) {  // the upper band, from the top right towards the middle
+            const int c = bw * 20 / 100 - bw * 32 / 100 * q / 450;
+            xa = c - bw * 19 / 100;
+            xb = c + bw * 19 / 100;
+          } else if (q < 560) {  // the crossbar
+            xa = -bw * 30 / 100;
+            xb = bw * 30 / 100;
+          } else {  // the lower band, narrowing to a point at the bottom left
+            const int f = (q - 560) * 1000 / 440;
+            const int c = bw * 12 / 100 - bw * 32 / 100 * f / 1000;
+            const int half = bw * 19 / 100 * (1000 - f) / 1000;
+            xa = c - half;
+            xb = c + half;
+          }
+          panel.fill_rect(mid + xa - grow, by + row, xb - xa + 1 + 2 * grow, 1, col);
+        }
+      };
+      bolt(pad, bg_);
+      bolt(0, kText);
+    }
+
+    // The percentage, then the detail's lines.
+    int y = top + ih + gap;
+    if (number) {
+      panel.text(cx - Canvas::text_width(m.headline, ps) / 2, y, m.headline, ps, ink);
+      y += ph + gap;
+    }
+    const std::string a = fit(line1, (box_w + ls1) / (font::kCellWidth * ls1));
+    panel.text(cx - Canvas::text_width(a, ls1) / 2, y, a, ls1, kText);
+    y += Canvas::line_height(ls1);
+    if (!line2.empty()) {
+      const std::string b = fit(line2, (box_w + ls2) / (font::kCellWidth * ls2));
+      panel.text(cx - Canvas::text_width(b, ls2) / 2, y, b, ls2, kDim);
+    }
+
+    // The hint, if any, in the bottom band where the bar would be.
+    if (m.hint.empty()) return;
+    const int hw = panel_.round ? W * 60 / 100 : W - 8 * s;
+    const std::string hint = fit(m.hint, (hw + s) / (font::kCellWidth * s));
+    panel.text(cx - Canvas::text_width(hint, s) / 2, hy + s, hint, s, kDim);
+  });
+}
+
 // The resting clock face (App::clock_tick). The whole panel: the time's middle row
 // on the glass centre, the date below it, and the mascot above like a watch logo
 // when the chord there holds it; a rectangular panel centres the group and drops
@@ -1278,8 +2069,8 @@ void Ui::draw_alarm(const UiModel& m) {
 // the per-minute shift can move it. The face changes once a minute: the burn-in
 // shift keys the hash on the minute too.
 void Ui::draw_clock(const UiModel& m) {
-  band_ = ArcSweep{};  // no arc over the clock
-  band_shown_ = false;
+  // The ring's ticks go on with the clock: each push paints them, turned with this minute's
+  // shift (edge_ring), and a new second moves only the dot (draw_frame, update_ring).
   const uint32_t key = Hash().add(m.clock_time).add(m.clock_date).val(m.clock_minute).val(m.lang)
                            .add(m.face ? m.face->hash : std::string()).get();
   if (valid_ && full_face_ == FullFace::Clock && key == face_hash_) return;  // invalidate() repaints it too
@@ -1291,7 +2082,8 @@ void Ui::draw_clock(const UiModel& m) {
   const int W = panel_.width, H = panel_.height;
   const int cx = W / 2, cy = H / 2, R = std::min(W, H) / 2;
   // The burn-in shift moves the whole face a few pixels each minute.
-  const int dx = (m.clock_minute * 7) % 9 - 4, dy = (m.clock_minute * 5) % 9 - 4;
+  const BurnInShift shift = burn_in_shift(m.clock_minute);
+  const int dx = shift.dx, dy = shift.dy;
   const int gap = 3 * s;
   const int margin = 4;
   // The profile's face where it has one, like the Ready screen and the alarm:

@@ -45,10 +45,16 @@ class Board:
 BOARDS = {
     "sim-320x240": Board("sim-320x240", 320, 240),
     "sim-240x135": Board("sim-240x135", 240, 135),
+    # Geometry/audio only; physical keyboard/editor have separate host C++ tests.
+    "cardputer-adv": Board("cardputer-adv", 240, 135),
     "sim-480x320": Board("sim-480x320", 480, 320),
     "sim-240x240-nospeaker": Board("sim-240x240-nospeaker", 240, 240, speaker=False),
     # A 1.54" 240x240 SPI LCD with codecs (e.g. Waveshare ESP32-S3-LCD-1.54): no scroll buttons.
     "sim-240x240": Board("sim-240x240", 240, 240, scroll_buttons=False),
+    # A 1.83" 240x284 SPI LCD with touch (e.g. Waveshare ESP32-S3-Touch-LCD-1.83).
+    "sim-240x284": Board("sim-240x284", 240, 284, scroll_buttons=False, touch=True),
+    # A 2.8" 240x320 SPI LCD in portrait with touch (e.g. LCDWIKI ES3C28P).
+    "sim-240x320": Board("sim-240x320", 240, 320, scroll_buttons=False, touch=True),
     # A 1.28" round 240x240 LCD with touch (e.g. Spotpear ESP32-S3-1.28-BOX): no scroll buttons.
     "sim-240x240-round": Board("sim-240x240-round", 240, 240, scroll_buttons=False, round=True, touch=True),
     # Waveshare 1.85C V2: round LCD and touch, no scroll buttons.

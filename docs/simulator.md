@@ -92,6 +92,8 @@ Like a board, the simulated device takes firmware updates (`hermes gadget update
 | `sim-240x135` | 240×135 | Small TFT; text drops to scale 1 |
 | `sim-480x320` | 480×320 | Larger panel |
 | `sim-240x240` | 240×240 | The 1.54" LCD board: two buttons, no scroll buttons, so long replies page by themselves |
+| `sim-240x284` | 240×284 | The 1.83" Touch-LCD: hold the mouse on the screen to talk, click to answer yes, drag down to cancel. No scroll buttons |
+| `sim-240x320` | 240×320 | The 2.8" LCDWIKI ES3C28P in portrait: hold the mouse on the screen to talk, click to answer yes, drag down to cancel. No scroll buttons |
 | `sim-240x240-nospeaker` | 240×240 | No speaker, so replies stay text only |
 | `sim-240x240-round` | 240×240 round | The Spotpear 1.28-BOX touch board, the smallest round screen, with the same controls as `sim-466x466-round` |
 | `sim-360x360-round` | 360×360 round | The 1.85C V2 LCD touch board, with the same controls as `sim-466x466-round` |
@@ -126,7 +128,7 @@ Script commands, one per line:
 | `time <YYYY-MM-DDTHH:MM>` \| `time now` | Pin the simulated clock's time at that moment, or follow the computer's clock again |
 | `expect <text>` | Fail unless the last reply contains `<text>` |
 
-Screens are `boot`, `offline`, `connecting`, `pairing`, `ready`, `listening`, `thinking`, `responding`, `card`, `image`, `prompt`, `updating`, `settings`, `setup`, `dashboard`, `profiles`, `alarm`, `clock` and `error`. The `setup` screen belongs to the ESP32 phone-setup flow; the simulator does not start a Wi-Fi access point.
+Screens are `boot`, `offline`, `connecting`, `pairing`, `ready`, `listening`, `thinking`, `responding`, `card`, `image`, `prompt`, `updating`, `settings`, `setup`, `dashboard`, `profiles`, `alarm`, `clock`, `low_battery`, `charging`, `charged` and `error`. The `setup` screen belongs to the ESP32 phone-setup flow; the simulator does not start a Wi-Fi access point.
 
 For example, after `wait ready 20`:
 

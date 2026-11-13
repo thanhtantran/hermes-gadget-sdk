@@ -68,11 +68,12 @@ Because the id is derived from the key, nobody can claim another device's id wit
 
 - Every `caps` member is optional. A device without a speaker omits `speaker`, and the server then never sends it audio.
 - `caps.speaker.formats` (`["pcm16", "opus"]`) lists the speaker audio formats the device decodes. `format` stays `"pcm16"` for servers that predate the list, and PCM16 is always accepted. See [Audio to the device](#audio-to-the-device).
+- `caps.speaker.buffer_ms` (`4096`) is how much reply audio, in milliseconds, the device can hold before it plays it. The server then sends audio further ahead of real time, which keeps playback smooth on a link whose delay varies, such as a phone hotspot. It is optional: without it the server keeps its default lead. See [Audio to the device](#audio-to-the-device).
 - `caps.ota` (`{"max_size": 2031616}`) means the device installs firmware updates over this connection, up to `max_size` bytes.
 - `caps.dashboard` (`{"v": 1, "rows": 6}`) means the device draws the [dashboard](#dashboard). `v` is the newest layout it draws, and `rows` is how many lines fit on its screen at once.
 - `actions` is the device's tool manifest. Each action has a JSON-Schema `params` object and a `description` written for the model.
 - `caps.profiles: true` means the device can switch Hermes profiles (see [Profiles](#profiles)). `profile` is the profile it used last; it is omitted for `default`.
-- `caps.faces: 1` means the device draws a face that the server sends for the profile answering it (see [Faces](#faces)). `caps.faces: {"v": 2, "px": 192}` means it also draws colour faces, at `px` pixels square (at most 256): the largest size its Ready screen draws the face at. Where Ready has less room, for example with a second caption line while the device offers profiles, the device scales the face down. `"frames": true` in that object means its colour faces also blink and talk. `face` is the `hash` of the face it holds from an earlier connection; it is omitted when it shows the mascot.
+- `caps.faces: 1` means the device draws a face that the server sends for the profile answering it (see [Faces](#faces)). `caps.faces: {"v": 2, "px": 192}` means it also draws colour faces, at `px` pixels square (at most 256): the largest size its Ready screen draws the face at. Where Ready has less room, for example with a second caption line while the device offers profiles, the device scales the face down. `"frames": true` in that object means its colour faces also blink and talk. `"thumbs": 96` in that object means the device's profile grid also takes a thumbnail of each offered profile, 96 pixels square (16 to 128); see [Profile thumbnails](#profile-thumbnails). `face` is the `hash` of the face it holds from an earlier connection; it is omitted when it shows the mascot. `thumbs` (`{"ops": "9c1d0e2f3a4b5c6d"}`) names the thumbnails it holds from an earlier connection, profile id to `hash`; it is `{}` when it holds none, and omitted by a device without `caps.faces.thumbs`.
 - `token` is required only when the host sets `GADGET_ACCESS_TOKEN`. A mismatch is rejected with error code `bad_token`.
 - `display_sleeping: true` means the screen is dark as the device connects; it is omitted while the screen is lit. See [Screen sleep](#screen-sleep).
 
@@ -109,7 +110,7 @@ If authentication fails, the server sends `{"type": "error", "code": "auth_faile
  "profile": "ops", "profiles": [{"id": "default", "name": "Hermes"}, {"id": "ops", "name": "Ops"}]}
 ```
 
-`profile` and `profiles` are present only when the device sent `caps.profiles` and the server offers profiles. The Hermes plugin offers the profiles a multiplexed gateway serves that `platforms.gadget.extra.profiles` lists (all of them for `all`), with `default` first; without that setting it offers none. The device keeps the first 8 entries of `profiles` and ignores the rest.
+`profile` and `profiles` are present only when the device sent `caps.profiles` and the server offers profiles. The Hermes plugin offers the profiles a multiplexed gateway serves that `platforms.gadget.extra.profiles` lists (all of them for `all`), with `default` first; without that setting it offers none. The device keeps the first 32 entries of `profiles` and ignores the rest.
 
 `face` is present only when the device named a face in `hello.face` and may keep it; see [Faces](#faces).
 
@@ -131,6 +132,9 @@ A Hermes gateway can serve several profiles (each with its own memory, personali
 | `{"type": "profile.select", "profile": "ops"}` | device → server | Ask to talk to another profile |
 | `{"type": "profile", "profile": "ops"}` | server → device | The profile now answering this device; the device stores it and sends it as `hello.profile` next time |
 | `{"type": "profile", "profile": "default", "error": "busy"}` | server → device | The request was refused; `profile` is unchanged. `error` is `unknown`, `busy` (a turn or question is pending), `unpaired` or `routed` |
+| `{"type": "profiles", "profiles": [{"id": "default", "name": "Hermes"}, {"id": "ops", "name": "Ops"}]}` | server → device | The profiles the device may use changed since `welcome` (one created, deleted, parked or taken off the offer); the list replaces `welcome.profiles` |
+
+The server sends `profiles` only to a device that sent `caps.profiles: true`, and only when that device's list changes; its entries are those of `welcome.profiles`. It doesn't change the profile answering the device: when that profile leaves the list, the server sends `profile` with `default` as well. A device that doesn't know `profiles` ignores it, as it ignores any unknown message type, and gets the new list at its next welcome. The reference firmware replaces its list and, if the profile grid is open, redraws it on the same page, or on the last page when the list got shorter; with no other profile left, the grid closes. The Hermes plugin compares each device's list with Hermes's profiles at every pairing check, every 2 seconds, so a profile made with `hermes profile create` or in Hermes Desktop shows on the device within a few seconds, without a reconnect or a gateway restart.
 
 A refusal changes nothing on the device. `error` is `routed` when the server's configuration routes this device to a profile; such a device gets no `profiles` in `welcome`. The server may also send `profile` on its own, for example `default` after the device's approval is revoked. A device that does not send `caps.profiles` keeps the gateway's existing routing (normally the default profile).
 
@@ -174,6 +178,25 @@ A device with `"frames": true` also takes a colour face that blinks and talks. I
 
 The Hermes plugin sends a profile's `gadget-face.bin`, or else the profile's Hermes avatar made into a still face: in colour where the device draws colour faces, with the avatar's blink and talk pictures where it takes frames. See [Faces](faces.md#a-face-for-each-hermes-profile).
 
+### Profile thumbnails
+
+A device that sends `caps.faces.thumbs: N` shows each profile in its [profile grid](#profiles) with a picture, `N` pixels square, instead of the profile's initial. The server sends one for each profile in `welcome.profiles` that has a face, like a colour face but for any offered profile:
+
+| Message | Meaning |
+|---|---|
+| `{"type": "face.thumb.start", "stream": 12, "profile": "ops", "hash": "9c1d0e2f3a4b5c6d", "width": 96, "height": 96, "format": "rgb565"}` | A thumbnail begins; its pixels follow on binary channel 4, on `stream`, then `face.thumb.end` |
+| `{"type": "face.thumb.end", "stream": 12}` | End of the thumbnail's pixels |
+| `{"type": "face.thumb", "profile": "ops"}` | `ops` has no picture any more: the device shows its initial again |
+
+- The pixels are `N * N` RGB565 values, as for a colour face: little-endian, row-major, `0x0000` transparent, in chunks of up to 4096 bytes whose sequence numbers count up from 0. They share channel 4 with colour faces; `stream` tells them apart, so a thumbnail and a face may arrive at the same time.
+- `hash` names the thumbnail. The device keeps its thumbnails in memory through reconnects and names them in `hello.thumbs`; the server sends a profile's thumbnail only when its hash differs from the one the device named, or from the one it sent on this connection, so a reconnect sends nothing that did not change. A new thumbnail replaces only that profile's; the device shows the initial while its pixels arrive.
+- The device keeps a thumbnail only while it is paired and the profile is offered: a `welcome` that does not list the profile, a `welcome` with `paired: false` and `unpaired` drop it, and the server then forgets the hash too.
+- The device ignores a `face.thumb.start` for a profile the welcome did not offer, with another size or `format`, or a `hash` that is empty or longer than 64 characters, while unpaired, and a thumbnail whose chunks skip a sequence number or bring more than `N * N * 2` bytes; one whose `face.thumb.end` comes early is dropped.
+- The current profile's own colour or one-colour face, when the device holds one, shows in its cell instead of its thumbnail.
+- The reference firmware sends `caps.faces.thumbs` only on touchscreens with colour faces (so PSRAM). At start-up it sets aside room for 32 thumbnails at the size of the largest icon its grid draws, at most 128 px (1 MB); without room it tries smaller sizes down to 32 px, and without room for those sends no `thumbs`. A server that predates thumbnails ignores `caps.faces.thumbs` and `hello.thumbs`, and the grid shows initials.
+
+The Hermes plugin makes a profile's thumbnail from its `gadget-face.bin` (the idle picture, in the colour the device draws one-colour faces in) or else its Hermes avatar in colour. It looks again at each pairing check, every 2 seconds: see [Faces](faces.md#thumbnails-in-the-profile-grid).
+
 ## Conversation
 
 ### Device → server
@@ -189,6 +212,7 @@ The Hermes plugin sends a profile's `gadget-face.bin`, or else the profile's Her
 | `{"type": "prompt.reply", "id": "q1", "answer": "yes"}` | The answer (`yes` or `no`) to a `prompt` |
 
 - Utterances shorter than 0.25 s are dropped with a `notice`, and the server then sends a `turn.end` with an empty `turn` and outcome `cancelled`, so the device stops waiting.
+- A device may send a recording again after a lost connection, on the new connection and on a new `stream`, with the same `id`. Its `audio.start` then carries `"resent": 1` (how many times it was sent again) and `"age_ms"` (how long ago the recording began). Its frames arrive faster than real time. A server assembles an utterance by stream whatever the pace, so these fields are informational: the reference hub logs them, and older hubs ignore them.
 - The server caps an utterance at `max_utterance_s` (60 s by default).
 
 ### Server → device
@@ -206,7 +230,7 @@ The Hermes plugin sends a profile's `gadget-face.bin`, or else the profile's Her
 | `{"type": "prompt.close", "id": "q1"}` | The question was withdrawn (timed out or answered elsewhere) |
 | `{"type": "error", "code": "...", "message": "..."}` | Protocol or auth error; the server usually closes the connection next |
 
-Reply text is already shaped for the device: Markdown is stripped and the text is folded to what its `charset` draws. `"ascii"` gets printable ASCII only. `"latin1"` gets ASCII and Latin-1 (U+00A1 to U+00FF, so accented letters, ¿ ¡ and the like), with no-break spaces as plain spaces; anything else is folded to the nearest letter or dropped. Text is UTF-8 either way, and devices render it as-is. The reference firmware reports `"latin1"` since its font gained Latin-1; older firmware reports `"ascii"`.
+Reply text is already shaped for the device: Markdown is stripped and the text is folded to what its `charset` draws. `"ascii"` gets printable ASCII only. `"latin1"` gets ASCII and Latin-1 (U+00A1 to U+00FF, so accented letters, ¿ ¡ and the like), with no-break spaces as plain spaces; anything else is folded to the nearest letter or dropped. Text is UTF-8 either way, and devices render it as-is. The reference firmware reports `"latin1-cyrillic"`: its font also has the Russian alphabet (U+0410 to U+044F, Ё and ё), which that charset keeps on top of `"latin1"`; other Cyrillic letters are folded or dropped as other scripts are. Firmware from before that reports `"latin1"`, and older firmware still `"ascii"`. A plugin older than `latin1-cyrillic` does not know it and leaves the text unfolded: Russian then shows, but typographic quotes, dashes and emoji that it would have folded draw as `?`. Update the plugin before the firmware. Firmware built with the Chinese font (`HG_CJK_FONT`, [cjk.md](cjk.md)) reports `"cjk"`: Latin-1 plus Chinese, Japanese kana, Korean and fullwidth characters are kept, and the rest folds as for `"latin1"`.
 
 ### Audio to the device
 
@@ -220,7 +244,7 @@ Reply text is already shaped for the device: Markdown is stripped and the text i
 
 `format` is `"pcm16"` (little-endian mono samples) unless the device lists `"opus"` in `caps.speaker.formats`: then the server may send `"opus"`, and each binary frame carries one Opus packet (mono, at `rate`, one 40 ms frame; the last frame of a reply is padded with silence). The plugin sends Opus at 24 kbps when the host has libopus, about a tenth of PCM16 at 16 kHz, and falls back to PCM16 without it.
 
-The server resamples to the device's declared speaker rate. It also paces frames to real time, at most 0.5 s ahead, so a jitter buffer of about 1 s is enough. A new `audio.start` replaces the stream that is playing.
+The server resamples to the device's declared speaker rate. It also paces frames to real time, at most half of `caps.speaker.buffer_ms` ahead, and never less than 0.5 s or more than 3 s. A device that doesn't announce its buffer gets the 0.5 s lead, so a jitter buffer of about 1 s is enough for it. A new `audio.start` replaces the stream that is playing.
 
 ### Display
 
@@ -286,6 +310,16 @@ Hermes asks before some actions: destructive commands such as `/new`, a costly m
 | `{"type": "action.result", "id": "x1", "ok": false, "error": "color is required"}` | device → server |
 
 Devices must answer every `action` exactly once. The server times out after about 18 s.
+
+#### Optional `camera.capture` action
+
+A device with a camera may advertise `camera.capture` in `hello.actions`; it takes an empty parameter object. A successful `action.result` carries:
+
+```json
+{"format":"rgb565le","width":640,"height":512,"image_b64":"<base64>"}
+```
+
+`image_b64` is Base64-encoded, tightly packed, row-major RGB565 pixels in little-endian byte order, with no row padding. For the 7B port, the maximum dimensions are 640×512 (655,360 decoded bytes; 873,816 Base64 characters). For the CoreS3 port, the maximum dimensions are 640×480 (614,400 decoded bytes; 819,200 Base64 characters). The full result stays below the gateway's current 1 MiB action-frame limit. Other camera ports must keep the serialized result within their transport's frame limit. On capture failure, the device uses the existing `action.result` error form; no new message type is introduced. The plugin saves a successful result as a PNG under `~/.hermes/gadgetpix/` and gives the agent the file's path, width, height and size, never `image_b64`.
 
 ### Telemetry and events (device → server)
 

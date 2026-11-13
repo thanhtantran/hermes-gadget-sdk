@@ -13,6 +13,7 @@
 #include "esp_wifi.h"
 #include "sdkconfig.h"
 #include "lwip/inet.h"
+#include "link_diag.hpp"
 
 namespace hgp {
 namespace {
@@ -44,8 +45,14 @@ void Wifi::hold_while_attempting() {
   const bool want = retry_.attempting();
   if (!attempt_lock_ || want == attempt_held_) return;
   attempt_held_ = want;
-  if (want) esp_pm_lock_acquire(attempt_lock_);
-  else esp_pm_lock_release(attempt_lock_);
+  // Tell the touch task first, so it is back on its INT edge before the chip stays awake.
+  if (want) {
+    EspSystem::set_sleep_held(true);
+    esp_pm_lock_acquire(attempt_lock_);
+  } else {
+    esp_pm_lock_release(attempt_lock_);
+    EspSystem::set_sleep_held(false);
+  }
 }
 
 void Wifi::retry_now() {
@@ -58,6 +65,8 @@ bool Wifi::configure(const std::string& ssid, const std::string& password, const
   std::memcpy(cfg.sta.password, password.data(), password.size());
   cfg.sta.threshold.authmode = password.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
   cfg.sta.pmf_cfg.capable = true;
+  // Asked for when joining; only max modem sleep uses it (wifi_power.hpp).
+  cfg.sta.listen_interval = hg::WifiPowerSave::kListenInterval;
   if (aim) {
     // The access point that last worked, on its channel: no scan first (wifi_fast.hpp).
     cfg.sta.bssid_set = true;
@@ -205,6 +214,11 @@ void Wifi::connected(hg::App& app) {
   networks_.save(*storage_);
   pick_.reset(networks_.size());
   app.console(std::string("set server ") + candidate_.server);
+  if (candidate_.tailnet_given) {
+    // The key first: `tailnet on` starts the node with whatever key is saved.
+    if (candidate_.ts_key[0]) app.console(std::string("set ts_key ") + candidate_.ts_key);
+    app.console(std::string("set tailnet ") + (candidate_.tailnet_on ? "on" : "off"));
+  }
   candidate_ = {};
   joining_ = false;
   setup_status("connected");
@@ -243,7 +257,7 @@ void Wifi::tick(hg::App& app, uint32_t now) {
                 (close_at_ && static_cast<int32_t>(now - close_at_) >= 0))) app.close_wifi_setup();
   if (configured_ && retry_.due(now)) attempt(now);
   hold_while_attempting();
-  apply_power_save(now, app.in_turn());
+  apply_power_save(now, app);
 }
 
 void Wifi::attempt(uint32_t now) {
@@ -290,11 +304,17 @@ void Wifi::scan_done() {
   if (esp_wifi_connect() != ESP_OK) retry_.start_failed(now_ms());
 }
 
-void Wifi::apply_power_save(uint32_t now, bool in_turn) {
-  // Modem sleep only on battery and outside a turn (wifi_power.hpp); a board without a
-  // battery reading counts as plugged in.
-  const auto want = power_save_.change(now, [this] { return on_battery && on_battery(); }, in_turn);
-  if (want && esp_wifi_set_ps(*want ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE) == ESP_OK) power_save_.applied(*want);
+void Wifi::apply_power_save(uint32_t now, const hg::App& app) {
+  // Modem sleep only on battery and outside a turn, deeper while dozing quietly
+  // (wifi_power.hpp) unless `wifi_deep_sleep` is off; a board without a battery
+  // reading counts as plugged in.
+  const auto want = power_save_.change(now, [this] { return on_battery && on_battery(); }, app.in_turn(),
+                                       app.dozing() && app.wifi_deep_sleep(), app.traffic_at());
+  if (!want) return;
+  static constexpr wifi_ps_type_t kMode[] = {WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM};
+  if (esp_wifi_set_ps(kMode[static_cast<int>(*want)]) != ESP_OK) return;
+  power_save_.applied(*want);
+  ESP_LOGI("hg.wifi", "power save: %s", hg::wifi_sleep_name(*want));
 }
 
 void Wifi::on_event(void*, const char* base, int32_t id, void* data) {
@@ -304,9 +324,10 @@ void Wifi::on_event(void*, const char* base, int32_t id, void* data) {
     events::post(EventType::WifiScanDone);
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     auto* info = static_cast<wifi_event_sta_disconnected_t*>(data);
-    char detail[48];
-    std::snprintf(detail, sizeof(detail), "Wi-Fi lost (reason %d)", info ? info->reason : 0);
-    events::post(EventType::WifiDisconnected, detail, std::strlen(detail));
+    // "Wi-Fi lost (reason 200 beacon timeout, rssi -78)": the reason and the signal when it went.
+    const std::string detail = hg::link::wifi_lost(info ? info->reason : 0, info ? info->rssi : 0);
+    ESP_LOGW("hg.wifi", "%s", detail.c_str());
+    events::post(EventType::WifiDisconnected, detail.data(), detail.size());
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     const auto* got = static_cast<ip_event_got_ip_t*>(data);
     char detail[32];

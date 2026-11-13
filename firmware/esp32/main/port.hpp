@@ -21,13 +21,16 @@
 #include "board.hpp"
 #include "axp2101.hpp"
 #include "band_flush.hpp"
+#include "bmi270.hpp"
 #include "cores3.hpp"
 #include "pcf85063.hpp"
 #include "qmi8658.hpp"
 #include "shared_reply.hpp"
+#include "sticks3.hpp"
 #include "speaker_pa.hpp"
 #include "speaker_underruns.hpp"
 #include "tag_scanner.hpp"
+#include "tailnet_watch.hpp"
 #include "wifi_fast.hpp"
 #include "wifi_pick.hpp"
 #include "wifi_power.hpp"
@@ -145,6 +148,11 @@ class EspSystem final : public hg::System {
   bool enable_doze();
   void set_dozing(bool dozing) override;
   static bool dozing_now();  // for tasks that poll: poll less while dozing
+  // A lock holds the chip out of light sleep even while dozing (a Wi-Fi join attempt).
+  // A task that relies on light-sleep wakes then keeps its awake path instead.
+  static void set_sleep_held(bool held);
+  static bool sleep_held_now();
+  static inline void (*on_sleep_held_change)() = nullptr;  // e.g. end the touch task's wait
   std::function<void()> on_doze_start;  // e.g. power the speaker down
   std::function<void()> on_doze_end;    // e.g. power it up, retry Wi-Fi now: the user is back
 
@@ -179,6 +187,9 @@ class WsTransport final : public hg::Transport {
   // True when the send task has been stuck on one item for hg::ws::kStuckMs, or
   // couldn't take a client to close: the transport can't recover without a restart.
   bool stuck() const;
+  // While on (a turn), the send task logs once a second what it sent: bytes, messages, the
+  // longest send, the queue's peak, refusals, the CPU clock and the signal ("uplink: ...").
+  void set_metering(bool on) { metering_ = on; }
 
  private:
   static void on_event(void* arg, const char* base, int32_t id, void* data);
@@ -197,6 +208,13 @@ class WsTransport final : public hg::Transport {
   // message's first frame clears it.
   std::string rx_;
   uint8_t rx_opcode_ = 0;
+  std::atomic<bool> metering_{false};
+  std::atomic<uint32_t> refused_{0};  // messages enqueue() turned away for want of room
+  // The send in flight on the send task (generation 0: none), for the close reason on_event
+  // reports: a failed send closes the connection before it returns.
+  std::atomic<uint32_t> sending_gen_{0}, sending_since_{0};
+  std::atomic<uint32_t> connected_gen_{0};  // the last client generation that reached CONNECTED
+  std::atomic<size_t> sending_bytes_{0};
 };
 
 // ESP-IDF RGB timing bus with ST7701 command initialization on 3-wire SPI.
@@ -246,6 +264,7 @@ class DsiDisplay final : public hg::Display {
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   uint16_t* fb_ = nullptr;
+  uint16_t* transform_fb_ = nullptr;  // optional mirrored DSI scanout source
   bool use_dma2d_ = true;
   std::atomic<uint32_t> flushes_{0};
 };
@@ -316,11 +335,13 @@ class I2sSpeaker final : public hg::AudioOut {
   void abort() override;
   bool busy() const override;
   void set_volume(uint8_t percent) override { volume_ = percent; }
+  size_t buffer_bytes() const override { return capacity_; }
 
  private:
   static void task(void* arg);
   i2s_chan_handle_t tx_ = nullptr;
   StreamBufferHandle_t buffer_ = nullptr;
+  size_t capacity_ = 0;
   std::atomic<uint32_t> rate_{16000};
   std::atomic<bool> open_{false};
   std::atomic<bool> draining_{false};
@@ -339,12 +360,14 @@ class P4I2sSpeaker final : public hg::AudioOut {
   void abort() override;
   bool busy() const override;
   void set_volume(uint8_t percent) override { volume_ = percent; }
+  size_t buffer_bytes() const override { return capacity_; }
 
  private:
   static void task(void* arg);
   void set_pa(bool on);
   i2s_chan_handle_t tx_ = nullptr;
   StreamBufferHandle_t buffer_ = nullptr;
+  size_t capacity_ = 0;
   std::atomic<uint32_t> rate_{16000};
   std::atomic<bool> open_{false};
   std::atomic<bool> draining_{false};
@@ -441,6 +464,10 @@ inline void report_band_event(const char* tag, hg::BandFlush::Event event) {
 
 // Pulses the board's TCA9554 reset lines before the display and touch start.
 bool tca9554_reset(i2c_master_bus_handle_t bus, const ExpanderResetConfig& reset);
+// Holds TCA9554 enable, reset and backlight levels. Keeps the I2C device.
+bool tca9554_levels_begin(i2c_master_bus_handle_t bus, const ExpanderLevelConfig& levels);
+// On when percent > 0. No effect until tca9554_levels_begin succeeds.
+void tca9554_backlight(uint8_t percent);
 
 namespace i2c {
 // The board's shared I2C master bus (created on first use).
@@ -501,6 +528,7 @@ class CodecSpeaker final : public hg::AudioOut {
   void abort() override;
   bool busy() const override;
   void set_volume(uint8_t percent) override;
+  size_t buffer_bytes() const override { return capacity_; }
   // While dozing: close the DAC and its I2S channel (an enabled channel holds a
   // power lock that keeps the chip out of light sleep). Only for a speaker codec
   // the microphones don't share. begin() powers it back up before playing.
@@ -510,6 +538,12 @@ class CodecSpeaker final : public hg::AudioOut {
   }
   void power_down();
   void power_up();
+  // An amplifier enable that isn't an ESP32 pin (StickS3: behind the M5PM1).
+  // Used when begin() gets no PA pin; set it before begin().
+  std::function<void(bool)> board_pa;
+  // The board's ES8311 DAC fade ramp (CodecAudioConfig::dac_fade_ramp), written again when
+  // power_up() reopens the codec. Set it before begin().
+  bool es8311_fade_ramp = false;
 
  private:
   static void task(void* arg);
@@ -522,6 +556,7 @@ class CodecSpeaker final : public hg::AudioOut {
   int32_t* stereo_ = nullptr;
   std::optional<hg::SpeakerPa> pa_;  // set when this speaker, not esp_codec_dev, drives the PA pin
   StreamBufferHandle_t buffer_ = nullptr;
+  size_t capacity_ = 0;
   std::atomic<bool> open_{false};
   std::atomic<bool> draining_{false};
   std::atomic<bool> flush_{false};
@@ -537,6 +572,9 @@ class TouchInput {
              i2c_master_bus_handle_t bus);
   bool has_touch() const { return touch_dev_ != nullptr || managed_touch_ != nullptr; }
   bool has_key() const { return key_dev_ != nullptr; }
+  void nudge();  // ends the task's wait now, e.g. so a doze's end re-arms the INT edge at once
+  // The touch_wake setting: off, a doze leaves INT quiet instead of arming it as a wake source.
+  void set_wakes(bool on) { wakes_ = on; nudge(); }
 
  private:
   static void task(void* arg);
@@ -550,6 +588,8 @@ class TouchInput {
   static void on_encoder_b_edge(void* arg);  // IRAM: pulse-per-detent channel B
   void IRAM_ATTR encoder_pulse(int8_t channel);  // +1 = channel A, -1 = channel B; direction maps at post
   bool may_read(bool was_touching);
+  void arm_sleep_wake(bool dozing);
+  static esp_err_t on_sleep_exit(int64_t slept_us, void* arg);  // IRAM: a low INT after light sleep
   void wait(uint32_t ms);
   bool read_key(bool& pressed);
   TouchConfig touch_{};
@@ -559,6 +599,10 @@ class TouchInput {
   esp_lcd_touch_handle_t managed_touch_ = nullptr;
   bool int_gated_ = false;                // FT5x06 with INT: read after an edge or with a finger down
   std::atomic<bool> int_pending_{false};  // an edge since the last read
+  bool sleep_wake_ = false;               // touch_.int_wakes, and the INT gate and sleep hook are in place
+  bool sleep_wake_armed_ = false;         // dozing: INT's edge ISR is off (and INT wakes light sleep if wakes_)
+  std::atomic<bool> wakes_{true};         // the touch_wake setting
+  bool quiet_ = false;                    // this doze leaves INT quiet (wakes_ was off when it began)
   void* task_ = nullptr;                  // the touch task, woken by an edge
   gpio_num_t encoder_a_ = GPIO_NUM_NC;
   gpio_num_t encoder_b_ = GPIO_NUM_NC;
@@ -584,12 +628,16 @@ class MotionInput {
   // Counts good reads: the app task forwards a sample only when this moved, so a
   // sensor that stops answering goes stale in App::motion_tick instead of repeating.
   uint32_t samples() const { return samples_.load(std::memory_order_acquire); }
+  const char* chip_name() const { return cfg_.chip == ImuChip::Bmi270 ? "bmi270" : "qmi8658"; }
 
  private:
   static void task(void* arg);
+  bool start_chip();
+  bool read_chip(int16_t mg[3]);
   ImuConfig cfg_{};
   i2c_master_dev_handle_t dev_ = nullptr;
   std::unique_ptr<hg::Qmi8658> chip_;
+  std::unique_ptr<hg::Bmi270> bmi270_;
   std::atomic<int16_t> x_{0}, y_{0}, z_{0};
   std::atomic<uint32_t> samples_{0};
 };
@@ -667,10 +715,42 @@ class CoreS3Board {
  public:
   bool begin(i2c_master_bus_handle_t bus);
   void set_backlight(uint8_t percent);
+  // The GC0308's power/reset line: AW9523B P1_0, routed through CoreS3Control.
+  bool camera_power(bool on);
+  // The camera ribbon's power supplies down (the counterpart of camera_power(true)'s
+  // rails), leaving everything else on the same PMIC registers as it is.
+  bool camera_rails_off();
 
  private:
   i2c_master_dev_handle_t pmic_ = nullptr, expander_ = nullptr;
   std::unique_ptr<hg::CoreS3Control> control_;
+};
+
+// The CoreS3's hg::Camera implementation (port_camera_cores3.cpp). camera_hal()
+// returns nullptr on any other board; camera_hal_set_display() gives it the
+// panel for the live preview (call once after the display is up). The pipeline
+// starts on demand — camera_hal_begin() runs after the board's camera rails and
+// reset pulse — and camera_hal_stop() is its counterpart. A failed start
+// latches for the boot (camera_hal_start_failed(), and available() goes false).
+hg::Camera* camera_hal();
+void camera_hal_set_display(hg::Display* display);
+bool camera_hal_begin();
+bool camera_hal_running();
+bool camera_hal_start_failed();
+void camera_hal_stop();
+
+// The M5PM1's rails, amplifier and battery. Hal::power once begin() succeeded.
+class StickS3Board final : public hg::Power {
+ public:
+  bool begin(i2c_master_bus_handle_t bus);
+  void set_amplifier(bool on);
+  std::optional<hg::PowerStatus> read() override { return control_->read(); }
+  bool power_off() override { return control_->power_off(); }
+  std::optional<bool> external_power() override { return control_->external_power(); }
+
+ private:
+  i2c_master_dev_handle_t pm1_ = nullptr;
+  std::unique_ptr<hg::StickS3Control> control_;
 };
 
 // Opus reply audio (port_opus.cpp). It decodes on the app task, whose stack
@@ -808,7 +888,7 @@ class Wifi {
   bool attempt_held_ = false;
   void hold_while_attempting();
   hg::WifiPowerSave power_save_;
-  void apply_power_save(uint32_t now, bool in_turn);
+  void apply_power_save(uint32_t now, const hg::App& app);
   hg::WifiCredentials candidate_{};
   httpd_handle_t http_ = nullptr;
   std::mutex setup_mutex_;
@@ -836,6 +916,42 @@ class PhoneLink {
   void close_pairing();
   void forget();  // removes every paired phone and drops a connected one
   void set_name(const std::string& name);
+};
+
+// The device's own Tailscale node (TailTiny, components/tailtiny), for a Hermes host
+// that only listens on its tailnet address (docs/tailnet.md). Call everything from
+// the app task. It reports to hg::App::on_tunnel; TailTiny's own tasks never call
+// the app.
+class TailnetLink {
+ public:
+  // The build has CONFIG_HG_TAILNET and the board BoardConfig::tailnet.
+  static bool supported();
+  // `name` becomes the device's tailnet hostname (lowercased, other characters as '-').
+  // Runs before Wi-Fi, so before TailTiny starts: it carries out a pending forget().
+  void begin(hg::App& app, const std::string& name);
+  void network_up();    // Wi-Fi has an address: start the node, or move it to the new network
+  void network_down();  // Wi-Fi is gone: the tunnel is too, until network_up()
+  // `tailnet` or `ts_key` changed. Starting is live; stopping, or a new key for a
+  // running node, restarts the device (TailTiny can't stop and start again cleanly).
+  void settings_changed();
+  void tick(uint32_t now);
+  // Factory reset: TailTiny's keys and cached peers, erased at the next boot. False when
+  // that couldn't be scheduled.
+  bool forget();
+  void report(hg::json::Value& r);  // the `diag` report's "tailnet" part
+
+ private:
+  void start();
+  hg::App* app_ = nullptr;
+  void* node_ = nullptr;   // tailtiny_t*
+  std::string key_;        // the key node_ registered with (TailTiny keeps a pointer)
+  std::string name_;       // its tailnet hostname, likewise
+  uint32_t server_ip_ = 0; // Hermes's tailnet address in host order; 0 when it isn't one
+  bool wifi_up_ = false;
+  bool reset_unresolved_ = false;  // a factory-reset request begin() couldn't read or carry out
+  hg::TailnetWatch watch_;
+  bool restart_ = false, restart_timed_ = false;
+  uint32_t next_check_ = 0, restart_at_ = 0;
 };
 
 namespace diag {

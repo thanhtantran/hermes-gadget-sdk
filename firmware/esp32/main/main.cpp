@@ -1,8 +1,12 @@
 // Hermes Gadget firmware entry point: wires the ESP32 drivers to the portable
 // core (hg::App) and runs the app loop on the main task.
 #include "port.hpp"  // first: pulls in FreeRTOS.h ahead of task.h/queue.h
+#include "port_cardputer.hpp"
+#include "port_sdlog.hpp"
 
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
@@ -15,6 +19,10 @@
 #include "hg/touch.hpp"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#if CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B || CONFIG_HG_BOARD_CORES3
+#include "hg/crypto.hpp"
+#include "port_camera.hpp"
+#endif
 #if SOC_MIPI_DSI_SUPPORTED
 #include "esp_ldo_regulator.h"
 #endif
@@ -44,6 +52,10 @@ hgp::EspSystem g_system;
 hgp::NvsStorage g_storage;
 hgp::WsTransport g_transport;
 hgp::SpiDisplay g_display;
+#if CONFIG_HG_BOARD_CARDPUTER_ADV
+hg::CardputerCompose g_compose(g_display);
+hgp::CardputerKeyboard g_keyboard;
+#endif
 // The microphone object holds handles and no buffers, so the CYD uses it too:
 // its PDM mic runs on I2S0, the one port with the PDM-to-PCM converter.
 hgp::I2sMic g_mic;
@@ -69,10 +81,16 @@ hgp::MotionInput g_motion;
 hgp::AxpPower g_power;
 hgp::LatchPower g_latch_power;
 hgp::CoreS3Board g_cores3;
+hgp::StickS3Board g_sticks3;
 hgp::PhoneLink g_phone;
+hgp::TailnetLink g_tailnet;
 #endif
 hgp::Buttons g_buttons;
 hgp::Wifi g_wifi;
+hgp::SdLogger g_sdlog;
+#if CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B
+hgp::CameraCapture g_camera;
+#endif
 hgp::TimePort g_time;
 hgp::EspUpdater g_updater;
 hg::TouchGestures* g_gestures = nullptr;
@@ -137,6 +155,89 @@ void add_status_led(hg::App& app, int gpio) {
   app.add_action(std::move(led));
 }
 
+#if CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B
+void add_camera_action(hg::App& app, i2c_master_bus_handle_t sccb_bus) {
+  hg::Action camera;
+  camera.name = "camera.capture";
+  camera.description = "Take a still photo with the attached OV5647 camera. The gateway saves it as a PNG and returns its path.";
+  camera.params.set("type", "object").set("properties", hg::json::Value::object());
+  camera.handler = [sccb_bus](const hg::json::Value&, hg::json::Value& result, std::string& error) {
+    std::vector<uint8_t> pixels;
+    uint16_t width = 0, height = 0;
+    if (!g_camera.capture_rgb565(sccb_bus, pixels, width, height, error)) return false;
+    if (pixels.size() > 640u * 512u * 2u) {
+      error = "captured image exceeds the action-result limit";
+      return false;
+    }
+    result.set("format", "rgb565le")
+        .set("width", static_cast<unsigned>(width))
+        .set("height", static_cast<unsigned>(height))
+        .set("image_b64", hg::crypto::base64_encode(pixels.data(), pixels.size()));
+    return true;
+  };
+  app.add_action(std::move(camera));
+}
+#elif CONFIG_HG_BOARD_CORES3
+// The Camera HAL's start/stop bookkeeping. The pipeline starts on demand (the
+// camera mode opening, or a capture) and stops when it leaves, or 60 s after
+// the last capture — a feature most sessions won't use need not pay for PSRAM
+// and sensor power the whole boot. A start that fails latches for the boot:
+// the Camera item hides and captures report the latch.
+static uint32_t camera_use_ms = 0;  // the last start or capture: the 60 s stop counts from it
+
+static bool ensure_camera_run() {
+  if (hgp::camera_hal_running()) return true;
+  if (hgp::camera_hal_start_failed()) return false;
+  if (!g_cores3.camera_power(true)) {
+    // camera_power(true) puts the rails up before it pulses the expander, so a
+    // mid-way failure can leave the ribbon powered: down as far as the bus
+    // answers, then report the failed start either way.
+    g_cores3.camera_power(false);
+    g_cores3.camera_rails_off();
+    return false;
+  }
+  if (!hgp::camera_hal_begin()) {
+    // A start that got as far as powering up leaves the camera powered down.
+    g_cores3.camera_power(false);
+    g_cores3.camera_rails_off();
+    return false;
+  }
+  camera_use_ms = xTaskGetTickCount();
+  return true;
+}
+
+static void stop_camera() {
+  hgp::camera_hal_stop();       // the driver's frame buffers go back to PSRAM
+  g_cores3.camera_power(false); // the sensor is held in reset
+  g_cores3.camera_rails_off();  // and the ribbon's supplies go off
+}
+
+void add_camera_action(hg::App& app, i2c_master_bus_handle_t sccb_bus) {
+  static hgp::CameraCapture cores3_camera;
+  hg::Action camera;
+  camera.name = "camera.capture";
+  camera.description = "Take a still photo with the GC0308 camera. The gateway saves it as a PNG and returns its path.";
+  camera.params.set("type", "object").set("properties", hg::json::Value::object());
+  camera.handler = [sccb_bus](const hg::json::Value&, hg::json::Value& result, std::string& error) {
+    std::vector<uint8_t> pixels;
+    uint16_t width = 0, height = 0;
+    if (!hgp::camera_hal_running()) ensure_camera_run();
+    if (!cores3_camera.capture_rgb565(sccb_bus, pixels, width, height, error)) return false;
+    camera_use_ms = xTaskGetTickCount();  // a capture keeps the pipeline up for its 60 s
+    if (pixels.size() > 640u * 512u * 2u) {
+      error = "captured image exceeds the action-result limit";
+      return false;
+    }
+    result.set("format", "rgb565le")
+        .set("width", static_cast<unsigned>(width))
+        .set("height", static_cast<unsigned>(height))
+        .set("image_b64", hg::crypto::base64_encode(pixels.data(), pixels.size()));
+    return true;
+  };
+  app.add_action(std::move(camera));
+}
+#endif
+
 // Supplies switched straight from a GPIO go on before anything talks to the
 // parts behind them.
 void power_rails_on(const hgp::BoardConfig& b) {
@@ -180,15 +281,24 @@ void dispatch(hg::App& app, hgp::Event& ev) {
       g_wifi.connected(app);
       app.on_network(true, text ? text : "");
       g_time.set_network(true);
+#if !CONFIG_HG_BOARD_ESP32_CYD
+      g_tailnet.network_up();
+#endif
       break;
     case EventType::NetDown:
       app.on_network(false, text ? text : "");
       g_time.set_network(false);
+#if !CONFIG_HG_BOARD_ESP32_CYD
+      g_tailnet.network_down();
+#endif
       break;
     case EventType::WifiDisconnected:
       g_wifi.disconnected();
       app.on_network(false, text ? text : "");
       g_time.set_network(false);
+#if !CONFIG_HG_BOARD_ESP32_CYD
+      g_tailnet.network_down();
+#endif
       break;
     case EventType::WifiStarted: g_wifi.reconfigure(); break;
     case EventType::WifiScanDone: g_wifi.scan_done(); break;
@@ -212,8 +322,12 @@ void dispatch(hg::App& app, hgp::Event& ev) {
       }
       break;
     case EventType::Key:
-      if (g_key_cancel && ev.len == sizeof(hgp::KeySample)) {
-        app.on_button(hg::Button::Cancel, reinterpret_cast<const hgp::KeySample*>(ev.data)->pressed);
+      if (ev.len == sizeof(hgp::KeySample)) {
+        const bool pressed = reinterpret_cast<const hgp::KeySample*>(ev.data)->pressed;
+        // Not CANCEL with `touch_cancel swipe`, but still a key that lights a dark screen
+        // (DeviceProfile::wake_key): with touch_wake off it may be the only way back.
+        if (g_key_cancel) app.on_button(hg::Button::Cancel, pressed);
+        else if (pressed) app.wake_display();
       }
       break;
     case EventType::Encoder:
@@ -245,12 +359,17 @@ void dispatch(hg::App& app, hgp::Event& ev) {
 
 }  // namespace
 
+/** Initialize the selected board and serialize App, input and display work on this task. */
 extern "C" void app_main(void) {
   hgp::diag::begin();  // first, so `diag log` has the whole boot
   init_nvs();
   hgp::events::init();
   ESP_ERROR_CHECK(g_storage.begin() ? ESP_OK : ESP_FAIL);
   const hgp::BoardConfig& board = hgp::board_config();
+  // SD log mirror: starts disabled and syncs to the stored sd_log setting
+  // below (off by default), so no file appears until it is switched on.
+  // Boards without a slot stay silent.
+  g_sdlog.begin(board.sd, false);
   power_rails_on(board);
   // A board whose amplifier hangs off the chip's own DAC (the CYD's SC8002B on
   // GPIO26) gets three boot beeps: they show the amplifier and speaker work
@@ -329,9 +448,13 @@ extern "C" void app_main(void) {
   // GPIO45/46 belong to VDD_IO_5 on the P4; acquire LDO4 before creating I2C0.
   i2c_master_bus_handle_t i2c_bus = io_rail_ready ? hgp::i2c::bus(board.i2c) : nullptr;
   const bool peripherals_ready = io_rail_ready && (!board.cores3 || g_cores3.begin(i2c_bus)) &&
-      (!board.expander_reset.mask || hgp::tca9554_reset(i2c_bus, board.expander_reset));
+      (!board.sticks3 || g_sticks3.begin(i2c_bus)) &&
+      (!board.expander_reset.mask || hgp::tca9554_reset(i2c_bus, board.expander_reset)) &&
+      (!board.expander_levels.enabled || hgp::tca9554_levels_begin(i2c_bus, board.expander_levels));
   if (board.cores3 && peripherals_ready)
     g_display.board_backlight = [](uint8_t percent) { g_cores3.set_backlight(percent); };
+  if (board.expander_levels.backlight && peripherals_ready)
+    g_display.board_backlight = [](uint8_t percent) { hgp::tca9554_backlight(percent); };
   if (peripherals_ready && board.lcd.enabled) {
 #if SOC_MIPI_DSI_SUPPORTED
     if (board.lcd.bus.type == hgp::LcdBus::Type::Dsi) {
@@ -355,6 +478,15 @@ extern "C" void app_main(void) {
   } else
 #endif
   if (board.speaker.enabled && g_speaker.begin(board.speaker)) hal.speaker = &g_speaker;
+#if CONFIG_HG_BOARD_CORES3
+  // The CoreS3's GC0308: the camera HAL rides the panel once the display is up.
+  // The pipeline starts on demand (the camera mode opening, or a capture) and
+  // stops after, so the boot pays nothing for a feature most sessions skip.
+  if (hal.display != nullptr) {
+    hgp::camera_hal_set_display(hal.display);
+    hal.camera = hgp::camera_hal();
+  }
+#endif
   if (board.axp2101 && g_power.begin(i2c_bus)) {
     hal.power = &g_power;
     if (board.axp_power_key) g_power.use_power_key();
@@ -365,10 +497,16 @@ extern "C" void app_main(void) {
 #if SOC_MIPI_DSI_SUPPORTED
   if (peripherals_ready && board.stc8_battery && g_stc8_power.begin(i2c_bus)) hal.power = &g_stc8_power;
 #endif
+  if (board.sticks3 && peripherals_ready) {  // peripherals_ready includes g_sticks3.begin()
+    hal.power = &g_sticks3;
+    g_wifi.on_battery = [] { return g_sticks3.external_power() == std::optional<bool>(false); };
+  }
   const bool audio_power = peripherals_ready && (!board.axp_audio_supply || g_power.enable_audio_supply());
   if (!audio_power) ESP_LOGE(TAG, "audio supply unavailable");
+  if (board.sticks3) g_codec_speaker.board_pa = [](bool on) { g_sticks3.set_amplifier(on); };
   if (board.codec.enabled && audio_power && g_codec.begin(board.codec, i2c_bus)) {
     if (g_codec_mic.begin(g_codec.in(), board.codec.rmnm_mics, g_codec.mic_link())) hal.mic = &g_codec_mic;
+    g_codec_speaker.es8311_fade_ramp = board.codec.dac_fade_ramp && board.codec.speaker == hgp::SpeakerCodec::Es8311;
     if (g_codec_speaker.begin(g_codec.out(), board.codec.stereo32, board.codec.speaker_pa ? board.codec.pa : -1)) hal.speaker = &g_codec_speaker;
     // Light-sleep boards power the DAC down while dozing, if the mics don't share it.
     if (board.light_sleep && g_codec.mic_link().switchable) g_codec_speaker.allow_power_down(g_codec.mic_link().format);
@@ -400,15 +538,21 @@ extern "C" void app_main(void) {
   else
 #endif
   parts.speaker = hal.speaker == &g_codec_speaker ?
-      (board.codec.speaker == hgp::SpeakerCodec::Aw88298 ? "aw88298" : "es8311") :
+      (board.codec.speaker == hgp::SpeakerCodec::Aw88298 ? "aw88298" :
+       board.codec.speaker == hgp::SpeakerCodec::Es8388 ? "es8388" : "es8311") :
       hal.speaker == &g_speaker ? "i2s" : "none";
   parts.touch = touch && g_touch.has_touch();
   parts.key = touch && g_touch.has_key();
   parts.i2c = i2c_bus;
-  parts.imu = imu ? "qmi8658" : "none";
+  parts.imu = imu ? g_motion.chip_name() : "none";
   parts.rtc = g_time.rtc_ready() ? "pcf85063" : "none";
   parts.motion = imu ? &g_motion : nullptr;
   parts.time = &g_time;
+#endif
+#if CONFIG_HG_BOARD_CARDPUTER_ADV
+  const bool keyboard = g_keyboard.begin(i2c_bus);
+  if (hal.display == &g_display) hal.display = &g_compose;
+  parts.key = keyboard;
 #endif
   g_buttons.begin(board.buttons);
   hgp::diag::set_parts(parts);
@@ -428,6 +572,23 @@ extern "C" void app_main(void) {
   // From PSRAM only, after the framebuffer: without room there, one-colour faces.
   if (profile.faces)
     profile.colour_face_alloc = [](size_t n) { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); };
+  // The recording buffer (1 MB for 30 s at 16 kHz, 1.5 MB at 24 kHz), PSRAM only, and only when
+  // about 1 MB of PSRAM stays free after it (RecordingBuffer::leaves_headroom). Otherwise the board
+  // streams as before, and a connection lost mid-recording ends the recording.
+  if (esp_psram_is_initialized())
+    profile.recording_alloc = [](size_t n) -> void* {
+      const size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+      if (!hg::RecordingBuffer::leaves_headroom(free_bytes, n)) {
+        ESP_LOGW(TAG, "recording buffer off: %u KB of PSRAM free, it needs %u KB and %u KB to spare",
+                 static_cast<unsigned>(free_bytes / 1024), static_cast<unsigned>(n / 1024),
+                 static_cast<unsigned>(hg::RecordingBuffer::kPsramHeadroom / 1024));
+        return nullptr;
+      }
+      void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      ESP_LOGI(TAG, "recording buffer %s: %u KB of PSRAM, %u KB free before", p ? "on" : "off (allocation failed)",
+               static_cast<unsigned>(n / 1024), static_cast<unsigned>(free_bytes / 1024));
+      return p;
+    };
 #else
   profile.faces = false;
 #endif
@@ -435,8 +596,14 @@ extern "C" void app_main(void) {
   profile.default_access_token = CONFIG_HG_DEFAULT_ACCESS_TOKEN;
   profile.has_cancel_button = board.buttons.cancel >= 0 || touch;
   profile.has_scroll_buttons = (board.buttons.up >= 0 && board.buttons.down >= 0) || board.encoder.a >= 0;
+  profile.wake_key = board.buttons.talk >= 0 || board.axp_power_key || board.pwr_key.enabled;
+  profile.talk_key = board.buttons.talk >= 0;
   profile.talk_label = board.talk_label;
   profile.cancel_label = board.cancel_label;
+#if CONFIG_HG_BOARD_CARDPUTER_ADV
+  profile.has_cancel_button = keyboard;
+  profile.has_scroll_buttons = keyboard;
+#endif
   if (touch && board.touch.enabled) {
     profile.touch_screen = true;
     profile.touch_ppi = board.touch.ppi;
@@ -450,6 +617,8 @@ extern "C" void app_main(void) {
     profile.vad_min_rms = board.codec.vad_min_rms;
   }
   if (hal.speaker == &g_codec_speaker) profile.speaker_rate = hgp::CodecAudio::kRate;
+  profile.tailnet = hgp::TailnetLink::supported();
+  profile.sd_log = board.sd.enabled;
 #endif
 
 #if CONFIG_HG_BOARD_ESP32_CYD
@@ -463,6 +632,9 @@ extern "C" void app_main(void) {
   if (profile.touch_screen) g_gestures = &gestures;
   apply_touch_cancel();
   add_status_led(app, board.status_led);
+#if CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B || CONFIG_HG_BOARD_CORES3
+  add_camera_action(app, i2c_bus);
+#endif
   app.on_setting_changed = [](std::string_view key) {
     if (key == "wifi_ssid" || key == "wifi_pass") app.close_wifi_setup();
     if (key == "wifi_ssid" || key == "wifi_pass" || key == "wifi_nets") g_wifi.networks_changed();
@@ -470,7 +642,10 @@ extern "C" void app_main(void) {
     if (key == "clock") g_time.set_wanted(app.clock_enabled());
     if (key == "timezone") g_time.apply_timezone(g_storage);
 #if !CONFIG_HG_BOARD_ESP32_CYD
+    if (key == "touch_wake") g_touch.set_wakes(app.touch_wake());
+    if (key == "sd_log") g_sdlog.set_enabled(app.sd_log());
     if (key == "name" && hgp::board_config().bluetooth) g_phone.set_name(device_name());
+    if (key == "tailnet" || key == "ts_key") g_tailnet.settings_changed();
 #endif
   };
 #if !CONFIG_HG_BOARD_ESP32_CYD
@@ -478,6 +653,10 @@ extern "C" void app_main(void) {
     app.on_phone_pair = [] { return g_phone.open_pairing(); };
     app.on_phone_pair_close = [] { g_phone.close_pairing(); };
     app.on_phone_forget = [] { g_phone.forget(); };
+  }
+  if (profile.tailnet) {
+    g_tailnet.begin(app, device_name());
+    app.on_tailnet_forget = [] { return g_tailnet.forget(); };
   }
 #endif
   app.on_wifi_setup = [] { return g_wifi.start_setup(); };
@@ -489,18 +668,25 @@ extern "C" void app_main(void) {
     report.set("ota", g_updater.describe());
 #if !CONFIG_HG_BOARD_ESP32_CYD
     if (const auto ma = g_power.charge_current_ma()) report.set("charge_current_ma", static_cast<unsigned>(*ma));
+    if (hgp::board_config().tailnet) g_tailnet.report(report);
 #endif
   };
   app.recent_log = &hgp::diag::recent_log;
   if (board.light_sleep) keep_pins_through_sleep(board);
 #if !CONFIG_HG_BOARD_ESP32_CYD
   g_system.on_doze_start = [] { g_codec_speaker.power_down(); };
+  hgp::EspSystem::on_sleep_held_change = [] { g_touch.nudge(); };
   g_system.on_doze_end = [] {
+    g_touch.nudge();
     g_codec_speaker.power_up();
     g_wifi.retry_now();
   };
 #endif
   app.begin();
+  g_sdlog.set_enabled(app.sd_log());  // the stored setting wins over the default
+#if !CONFIG_HG_BOARD_ESP32_CYD
+  g_touch.set_wakes(app.touch_wake());
+#endif
   g_time.set_wanted(app.clock_enabled());  // SNTP only while the clock face is on
   hgp::console::begin();
 
@@ -522,6 +708,7 @@ extern "C" void app_main(void) {
     }
     // A loss whose WsClosed event was dropped; harmless if it was delivered too.
     if (g_transport.take_lost()) app.on_transport_closed("disconnected");
+    g_transport.set_metering(app.in_turn());  // the uplink line, while recording, waiting or replying
     // Waiting would leave the device answering nothing until someone resets it.
     if (g_transport.stuck()) {
       ESP_LOGE(TAG, "the WebSocket send task is stuck; restarting");
@@ -529,9 +716,35 @@ extern "C" void app_main(void) {
       esp_restart();
     }
     g_buttons.poll(app);
+#if CONFIG_HG_BOARD_CARDPUTER_ADV
+    if (hal.display == &g_compose) g_keyboard.poll(app, g_compose);
+#endif
     g_wifi.tick(app, g_system.now_ms());
+#if !CONFIG_HG_BOARD_ESP32_CYD
+    g_tailnet.tick(g_system.now_ms());
+#endif
     if (g_gestures) g_gestures->tick(g_system.now_ms());
     app.tick();
+#if CONFIG_HG_BOARD_CORES3
+    // The camera pipeline's lifecycle: start when the camera mode opens, stop
+    // when it leaves, and stop 60 s after the last capture (the mode, when a
+    // capture ran on its own). A start that fails closes the mode and hides
+    // the Camera item for the rest of the boot.
+    static bool camera_mode_was = false;
+    const bool camera_mode_now = app.camera_open();
+    if (camera_mode_now != camera_mode_was) {
+      camera_mode_was = camera_mode_now;
+      if (camera_mode_now) {
+        ensure_camera_run();  // a failed start closes the mode below on the next pass
+        if (!hgp::camera_hal_running()) app.close_camera();  // the item hides; the menu comes back
+      } else {
+        stop_camera();
+      }
+    } else if (!camera_mode_now && hgp::camera_hal_running() &&
+               xTaskGetTickCount() - camera_use_ms >= pdMS_TO_TICKS(60000)) {
+      stop_camera();
+    }
+#endif
 #if !CONFIG_HG_BOARD_ESP32_CYD
     // The motion task keeps the latest sample; poll it about every 100 ms instead
     // of letting 10 Hz events fill the queue. Only new reads go to the app, so a
